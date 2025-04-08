@@ -154,13 +154,6 @@ func (ctx *clientContext) pullPc(isFirstPull bool) error {
 // Memory bus
 //==============================================================================
 
-type busDir uint8
-
-const (
-	busDirRead = busDir(iota)
-	busDirWrite
-)
-
 func (ctx *clientContext) readBus(addr uint16) (uint8, error) {
 	return ctx.eventReadBus(addr)
 }
@@ -771,13 +764,6 @@ type operand interface {
 // Relative --------------------------------------------------------------------
 type relOperand struct{ rel uint8 }
 
-func getRelOperand(op operand) relOperand {
-	rel, ok := op.(relOperand)
-	if !ok {
-		panic("invalid cast")
-	}
-	return rel
-}
 func (op relOperand) read(ctx *clientContext) (uint8, error) {
 	panic("attempted to read/write on an relative operand")
 }
@@ -1253,7 +1239,10 @@ func signExtBtoW(v uint8) uint16 {
 }
 
 func doBranch(ctx *clientContext, op operand, cond bool) {
-	rel := getRelOperand(op)
+	rel, ok := op.(relOperand)
+	if !ok {
+		panic("expected an relative operand")
+	}
 	if !cond {
 		return
 	}

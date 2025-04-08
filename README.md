@@ -17,6 +17,6 @@ node js/index.mjs path/to/the/json
 
 For example following will run JSR test, assuming you cloned the JSON test files repo at `65x02`:
 ```
-node node js/index.mjs 65x02/6502/v1/20.json
+node js/index.mjs 65x02/6502/v1/20.json
 ```
 

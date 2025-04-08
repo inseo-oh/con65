@@ -22,21 +22,62 @@ if (testPaths.length === 0) {
 const ram = new Uint8Array(16 * 1024 * 1024);
 const cpu = new CPUClient();
 let execLogs = [];
+let expectedCycles = [];
+let busFail = false;
 
 function hex(x) {
     return x.toString(16);
+}
+
+function cycleToBusLogFormat(cycAddr, cycVal, cycTyp) {
+    const typ = cycTyp === 'read' ? 'R' : 'W';
+    return `${typ} addr=${hex(cycAddr)} val=${hex(cycVal)}`;
 }
 
 cpu.onTraceExec = (pc, ir, disasm) => {
     execLogs.push(` EXEC | pc=${hex(pc)} ir=${hex(ir)} ${disasm}`);
 };
 cpu.onBusWrite = (addr, val) => {
-    execLogs.push(`  BUS | W addr=${hex(addr)} val=${hex(val)}`);
     ram[addr] = val;
+    let badReason = '';
+    if (expectedCycles.length === 0) {
+        badReason = 'Too many cycles';
+    } else {
+        const [cycAddr, cycVal, cycTyp] = expectedCycles.shift();
+        if (cycTyp != 'write' || cycAddr != addr || cycVal != val) {
+            const s = cycleToBusLogFormat(cycAddr, cycVal, cycTyp);
+            badReason = `Expected ${s}`;
+        }
+    }
+    if (badReason.length !== 0) {
+        busFail = true;
+    }
+    let busLog = `  BUS | W addr=${hex(addr)} val=${hex(val)}`;
+    if (busFail) {
+        busLog += `(BAD: ${badReason})`;
+    }
+    execLogs.push(busLog);
 };
 cpu.onBusRead = (addr) => {
     let val = ram[addr];
-    execLogs.push(`  BUS | R addr=${hex(addr)} val=${hex(val)}`);
+    let badReason = '';
+    if (expectedCycles.length === 0) {
+        badReason = 'Too many cycles';
+    } else {
+        const [cycAddr, cycVal, cycTyp] = expectedCycles.shift();
+        if (cycTyp != 'read' || cycAddr != addr || cycVal != val) {
+            const s = cycleToBusLogFormat(cycAddr, cycVal, cycTyp);
+            badReason = `Expected ${s}`;
+        }
+    }
+    if (badReason.length !== 0) {
+        busFail = true;
+    }
+    let busLog = `  BUS | R addr=${hex(addr)} val=${hex(val)}`;
+    if (busFail) {
+        busLog += `(BAD: ${badReason})`;
+    }
+    execLogs.push(busLog);
     return val;
 };
 
@@ -52,6 +93,8 @@ async function runTestFile(filename, fileText) {
         const initial = test.initial;
         const final = test.final;
         const loadPromises = [];
+        expectedCycles = structuredClone(test.cycles);
+        busFail = false;
 
         //------------------------------------------------------------------
         // Setup initial state
@@ -113,6 +156,19 @@ async function runTestFile(filename, fileText) {
             }
         }
 
+        if (busFail) {
+            failed = true;
+        }
+
+        //------------------------------------------------------------------
+        // See if there are remaining memory cycles
+        //------------------------------------------------------------------
+        let remainingCyclesLog = [];
+        for (const c of expectedCycles) {
+            remainingCyclesLog.push(cycleToBusLogFormat(...c));
+            failed = true;
+        }
+
         //------------------------------------------------------------------
         // Compare the final state
         //------------------------------------------------------------------
@@ -166,6 +222,14 @@ async function runTestFile(filename, fileText) {
 
         if (failed) {
             console.log(`[${filename}] ${test.name}`);
+            if (remainingCyclesLog.length !== 0) {
+                console.log(
+                    `:: Remaining cycles (${remainingCyclesLog.length}):`
+                );
+                for (const line of remainingCyclesLog) {
+                    console.log(`>>> ${line}`);
+                }
+            }
             if (mismatchLog.length !== 0) {
                 console.log(`:: Mismatches (${mismatchLog.length}):`);
                 for (const line of mismatchLog) {

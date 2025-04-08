@@ -437,7 +437,7 @@ func (b *sendBuf) appendS(s string) {
 		panic("string cannot be sent because it's too long(max: 255 bytes)")
 	}
 	b.appendB(byte(len(s)))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		b.dest[0] = s[i]
 		b.dest = b.dest[1:]
 	}
@@ -515,6 +515,9 @@ func (ctx *clientContext) fetchInstrW() (uint16, error) {
 	ctx.regPC += 2
 	return res, nil
 }
+func (ctx *clientContext) dummyReadAtPc() {
+	ctx.readMemB(ctx.regPC) // Dummy cycle
+}
 
 func (ctx *clientContext) runNextInstr() error {
 	instrPc := ctx.regPC
@@ -550,6 +553,8 @@ func (instr instrNop) disasm() string {
 }
 
 func (instr instrNop) exec(ctx *clientContext) error {
+	ctx.dummyReadAtPc()
+
 	return nil
 }
 

@@ -668,7 +668,12 @@ func (ctx *clientContext) runNextInstr() error {
 		operand = zpXOperand{addr}
 		operandDisasm = fmt.Sprintf("%#02x,x", addr)
 	case addrmodeZpY:
-		panic("todo")
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpYOperand{addr}
+		operandDisasm = fmt.Sprintf("%#02x,y", addr)
 	case addrmodeZpXInd:
 		addr, err := ctx.fetchInstrB()
 		if err != nil {
@@ -843,17 +848,17 @@ func (op absXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) e
 type absYOperand struct{ addr uint16 }
 
 func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
-	addrH16 := (op.addr & 0xff00)
+	addrH16 := ((op.addr & 0xff00) >> 8)
 	addrL16 := (op.addr & 0xff) + uint16(ctx.regY)
 	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		addrL16 &= 0xff
 		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		if isPageCross {
-			addrH16 += 0x0100
+			addrH16++
 		}
 	}
-	return addrL16 | addrH16
+	return addrL16 | (addrH16 << 8)
 }
 func (op absYOperand) read(ctx *clientContext) (uint8, error) {
 	return ctx.readMemB(op.getAddr(ctx, false))
@@ -910,6 +915,35 @@ func (op zpXOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(addr, v)
 }
 func (op zpXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr := op.getAddr(ctx)
+
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage, Y indexed ---------------------------------------------------------
+type zpYOperand struct{ addr uint8 }
+
+func (op zpYOperand) getAddr(ctx *clientContext) uint16 {
+	addr8 := op.addr
+	ctx.readMemB(uint16(addr8)) // Dummy read
+	addr8 += ctx.regY
+	return uint16(addr8)
+}
+func (op zpYOperand) read(ctx *clientContext) (uint8, error) {
+	addr := op.getAddr(ctx)
+	return ctx.readMemB(addr)
+}
+func (op zpYOperand) write(ctx *clientContext, v uint8) error {
+	addr := op.getAddr(ctx)
+	return ctx.writeMemB(addr, v)
+}
+func (op zpYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx)
 
 	v, err := ctx.readMemB(addr)
@@ -1078,6 +1112,27 @@ func initInstrTable() {
 	instrs[0x19] = &instr{"ora", oraExec, addrmodeAbsY}
 	instrs[0x01] = &instr{"ora", oraExec, addrmodeZpXInd}
 	instrs[0x11] = &instr{"ora", oraExec, addrmodeZpIndY}
+	// LDA ---------------------------------------------------------------------
+	instrs[0xa9] = &instr{"lda", ldaExec, addrmodeImm}
+	instrs[0xa5] = &instr{"lda", ldaExec, addrmodeZp}
+	instrs[0xb5] = &instr{"lda", ldaExec, addrmodeZpX}
+	instrs[0xad] = &instr{"lda", ldaExec, addrmodeAbs}
+	instrs[0xbd] = &instr{"lda", ldaExec, addrmodeAbsX}
+	instrs[0xb9] = &instr{"lda", ldaExec, addrmodeAbsY}
+	instrs[0xa1] = &instr{"lda", ldaExec, addrmodeZpXInd}
+	instrs[0xb1] = &instr{"lda", ldaExec, addrmodeZpIndY}
+	// LDX ---------------------------------------------------------------------
+	instrs[0xa2] = &instr{"ldx", ldxExec, addrmodeImm}
+	instrs[0xa6] = &instr{"ldx", ldxExec, addrmodeZp}
+	instrs[0xb6] = &instr{"ldx", ldxExec, addrmodeZpY}
+	instrs[0xae] = &instr{"ldx", ldxExec, addrmodeAbs}
+	instrs[0xbe] = &instr{"ldx", ldxExec, addrmodeAbsY}
+	// LDY ---------------------------------------------------------------------
+	instrs[0xa0] = &instr{"ldy", ldyExec, addrmodeImm}
+	instrs[0xa4] = &instr{"ldy", ldyExec, addrmodeZp}
+	instrs[0xb4] = &instr{"ldy", ldyExec, addrmodeZpX}
+	instrs[0xac] = &instr{"ldy", ldyExec, addrmodeAbs}
+	instrs[0xbc] = &instr{"ldy", ldyExec, addrmodeAbsX}
 	// Branch instructions -----------------------------------------------------
 	instrs[0xb0] = &instr{"bcs", bcsExec, addrmodeRel}
 	instrs[0x90] = &instr{"bcc", bccExec, addrmodeRel}
@@ -1257,6 +1312,39 @@ func oraExec(ctx *clientContext, op operand) error {
 	}
 	ctx.regA |= rhs
 	ctx.setNZ(ctx.regA)
+	return nil
+}
+
+// LDA -------------------------------------------------------------------------
+func ldaExec(ctx *clientContext, op operand) error {
+	v, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA = v
+	ctx.setNZ(ctx.regA)
+	return nil
+}
+
+// LDX -------------------------------------------------------------------------
+func ldxExec(ctx *clientContext, op operand) error {
+	v, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regX = v
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+
+// LDY -------------------------------------------------------------------------
+func ldyExec(ctx *clientContext, op operand) error {
+	v, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regY = v
+	ctx.setNZ(ctx.regY)
 	return nil
 }
 

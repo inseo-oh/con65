@@ -113,9 +113,21 @@ func (ctx *clientContext) writeP(v uint8) {
 // Stack
 //==============================================================================
 
-func (ctx *clientContext) push(v uint8) {
-	ctx.writeMemB(0x100+uint16(ctx.regS), v)
+func (ctx *clientContext) push(v uint8) error {
+	if err := ctx.writeMemB(0x100+uint16(ctx.regS), v); err != nil {
+		return err
+	}
 	ctx.regS--
+	return nil
+}
+func (ctx *clientContext) pushPc() error {
+	if err := ctx.push(uint8(ctx.regPC >> 8)); err != nil {
+		return err
+	}
+	if err := ctx.push(uint8(ctx.regPC)); err != nil {
+		return err
+	}
+	return nil
 }
 func (ctx *clientContext) pull(isFirstPull bool) (uint8, error) {
 	if isFirstPull {
@@ -596,9 +608,11 @@ func (ctx *clientContext) runNextInstr() error {
 	instrPc := ctx.regPC
 	// Fetch the opcode --------------------------------------------------------
 	var instr *instr
+	instrOpcode := uint8(0)
 	if v, err := ctx.fetchInstrB(); err != nil {
 		return err
 	} else {
+		instrOpcode = v
 		instr = instrs[v]
 		if instr == nil {
 			log.Panicf("opcode %#x is not implemented", v)
@@ -624,9 +638,28 @@ func (ctx *clientContext) runNextInstr() error {
 		operand = immOperand{val}
 		operandDisasm = fmt.Sprintf("#%#02x", val)
 	case addrmodeAbs:
-		addr, err := ctx.fetchInstrW()
-		if err != nil {
+		// Check if the opcode is JSR
+		addr := uint16(0)
+		if instrOpcode == 0x20 {
+			// JSR pushes PC after reading first byte of the absolute address, before 2nd byte is read.
+			addrL, err := ctx.fetchInstrB()
+			if err != nil {
+				return err
+			}
+			ctx.readMemB(0x100 + uint16(ctx.regS)) // Dummy read
+			if err := ctx.pushPc(); err != nil {
+				return err
+			}
+			// Now we read remaining half of the operand
+			addrH, err := ctx.fetchInstrB()
+			if err != nil {
+				return err
+			}
+			addr = (uint16(addrH) << 8) | uint16(addrL)
+		} else if v, err := ctx.fetchInstrW(); err != nil {
 			return err
+		} else {
+			addr = v
 		}
 		operand = absOperand{addr}
 		operandDisasm = fmt.Sprintf("%#04x", addr)
@@ -645,7 +678,12 @@ func (ctx *clientContext) runNextInstr() error {
 		operand = absYOperand{addr}
 		operandDisasm = fmt.Sprintf("%#04x,y", addr)
 	case addrmodeAbsInd:
-		panic("todo")
+		addr, err := ctx.fetchInstrW()
+		if err != nil {
+			return err
+		}
+		operand = absIndOperand{addr}
+		operandDisasm = fmt.Sprintf("%#04x", addr)
 	case addrmodeRel:
 		addr, err := ctx.fetchInstrB()
 		if err != nil {
@@ -875,6 +913,20 @@ func (op absYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) e
 	ctx.writeMemB(addr, v)
 	v = f(v)
 	return ctx.writeMemB(addr, v)
+}
+
+// Absolute indirect -----------------------------------------------------------
+type absIndOperand struct{ addr uint16 }
+
+// Only JMP uses this mode, and JMP handles it directly.
+func (op absIndOperand) read(ctx *clientContext) (uint8, error) {
+	panic("attempted to read/write on an absolute indirect operand")
+}
+func (op absIndOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to read/write on an absolute indirect operand")
+}
+func (op absIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	panic("attempted to read/write on an absolute indirect operand")
 }
 
 // Zeropage --------------------------------------------------------------------
@@ -1133,6 +1185,27 @@ func initInstrTable() {
 	instrs[0xb4] = &instr{"ldy", ldyExec, addrmodeZpX}
 	instrs[0xac] = &instr{"ldy", ldyExec, addrmodeAbs}
 	instrs[0xbc] = &instr{"ldy", ldyExec, addrmodeAbsX}
+	// STA ---------------------------------------------------------------------
+	instrs[0x85] = &instr{"sta", staExec, addrmodeZp}
+	instrs[0x95] = &instr{"sta", staExec, addrmodeZpX}
+	instrs[0x8d] = &instr{"sta", staExec, addrmodeAbs}
+	instrs[0x9d] = &instr{"sta", staExec, addrmodeAbsX}
+	instrs[0x99] = &instr{"sta", staExec, addrmodeAbsY}
+	instrs[0x81] = &instr{"sta", staExec, addrmodeZpXInd}
+	instrs[0x91] = &instr{"sta", staExec, addrmodeZpIndY}
+	// STX ---------------------------------------------------------------------
+	instrs[0x86] = &instr{"stx", stxExec, addrmodeZp}
+	instrs[0x96] = &instr{"stx", stxExec, addrmodeZpY}
+	instrs[0x8e] = &instr{"stx", stxExec, addrmodeAbs}
+	// STY ---------------------------------------------------------------------
+	instrs[0x84] = &instr{"sty", styExec, addrmodeZp}
+	instrs[0x94] = &instr{"sty", styExec, addrmodeZpX}
+	instrs[0x8c] = &instr{"sty", styExec, addrmodeAbs}
+	// JMP ---------------------------------------------------------------------
+	instrs[0x4c] = &instr{"jmp", jmpExec, addrmodeAbs}
+	instrs[0x6c] = &instr{"jmp", jmpExec, addrmodeAbsInd}
+	// JSR ---------------------------------------------------------------------
+	instrs[0x20] = &instr{"jsr", jsrExec, addrmodeAbs}
 	// Branch instructions -----------------------------------------------------
 	instrs[0xb0] = &instr{"bcs", bcsExec, addrmodeRel}
 	instrs[0x90] = &instr{"bcc", bccExec, addrmodeRel}
@@ -1348,6 +1421,54 @@ func ldyExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
+// STA -------------------------------------------------------------------------
+func staExec(ctx *clientContext, op operand) error {
+	return op.write(ctx, ctx.regA)
+}
+
+// STX -------------------------------------------------------------------------
+func stxExec(ctx *clientContext, op operand) error {
+	return op.write(ctx, ctx.regX)
+}
+
+// STY -------------------------------------------------------------------------
+func styExec(ctx *clientContext, op operand) error {
+	return op.write(ctx, ctx.regY)
+}
+
+// JMP -------------------------------------------------------------------------
+func jmpExec(ctx *clientContext, op operand) error {
+	if absOp, ok := op.(absOperand); ok {
+		ctx.regPC = absOp.addr
+	} else if indOp, ok := op.(absIndOperand); ok {
+		newPcL, err := ctx.readMemB(indOp.addr)
+		if err != nil {
+			return err
+		}
+		newPcH, err := ctx.readMemB(
+			// We emulate 6502's indirect JMP bug (= we preserve upper 8-bit of the address after adding 1 to it)
+			((indOp.addr + 1) & 0xffff & ^uint16(0xff00)) | (indOp.addr & 0xff00))
+		if err != nil {
+			return err
+		}
+		ctx.regPC = uint16(newPcL) | (uint16(newPcH) << 8)
+	} else {
+		panic("bad addressing mode")
+	}
+	return nil
+}
+
+// JSR -------------------------------------------------------------------------
+func jsrExec(ctx *clientContext, op operand) error {
+	// Note that PC was already pushed before we reached here (due to unusual way JSR works)
+	if absOp, ok := op.(absOperand); ok {
+		ctx.regPC = absOp.addr
+	} else {
+		panic("bad addressing mode")
+	}
+	return nil
+}
+
 // ADC -------------------------------------------------------------------------
 func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
 	carryVal := uint8(0)
@@ -1416,12 +1537,10 @@ func inyExec(ctx *clientContext, op operand) error {
 	return nil
 }
 func phaExec(ctx *clientContext, op operand) error {
-	ctx.push(ctx.regA)
-	return nil
+	return ctx.push(ctx.regA)
 }
 func phpExec(ctx *clientContext, op operand) error {
-	ctx.push(ctx.readP() | (1 << 4))
-	return nil
+	return ctx.push(ctx.readP() | (1 << 4))
 }
 func plaExec(ctx *clientContext, op operand) error {
 	v, err := ctx.pull(true)

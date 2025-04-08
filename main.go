@@ -110,6 +110,22 @@ func (ctx *clientContext) writeP(v uint8) {
 }
 
 //==============================================================================
+// Stack
+//==============================================================================
+
+func (ctx *clientContext) push(v uint8) {
+	ctx.writeMemB(0x100+uint16(ctx.regS), v)
+	ctx.regS--
+}
+func (ctx *clientContext) pull(isFirstPull bool) (uint8, error) {
+	if isFirstPull {
+		ctx.readMemB(0x100 + uint16(ctx.regS)) // Dummy read
+	}
+	ctx.regS++
+	return ctx.readMemB(0x100 + uint16(ctx.regS))
+}
+
+//==============================================================================
 // Memory bus
 //==============================================================================
 
@@ -1058,7 +1074,7 @@ func initInstrTable() {
 	instrs[0x30] = &instr{"bmi", bmiExec, addrmodeRel}
 	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
 	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
-	// Misc --------------------------------------------------------------------
+	// Instructions with implied operands --------------------------------------
 	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
 	instrs[0x18] = &instr{"clc", clcExec, addrmodeImp}
 	instrs[0xd8] = &instr{"cld", cldExec, addrmodeImp}
@@ -1071,6 +1087,10 @@ func initInstrTable() {
 	instrs[0x88] = &instr{"dey", deyExec, addrmodeImp}
 	instrs[0xe8] = &instr{"inx", inxExec, addrmodeImp}
 	instrs[0xc8] = &instr{"iny", inyExec, addrmodeImp}
+	instrs[0x48] = &instr{"pha", phaExec, addrmodeImp}
+	instrs[0x08] = &instr{"php", phpExec, addrmodeImp}
+	instrs[0x68] = &instr{"pla", plaExec, addrmodeImp}
+	instrs[0x28] = &instr{"plp", plpExec, addrmodeImp}
 
 }
 
@@ -1235,7 +1255,7 @@ func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow b
 	return
 }
 
-// Misc ------------------------------------------------------------------------
+// Instructions with implied operands ------------------------------------------
 func nopExec(ctx *clientContext, op operand) error {
 	return nil
 }
@@ -1285,5 +1305,30 @@ func inxExec(ctx *clientContext, op operand) error {
 func inyExec(ctx *clientContext, op operand) error {
 	ctx.regY++
 	ctx.setNZ(ctx.regY)
+	return nil
+}
+func phaExec(ctx *clientContext, op operand) error {
+	ctx.push(ctx.regA)
+	return nil
+}
+func phpExec(ctx *clientContext, op operand) error {
+	ctx.push(ctx.readP() | (1 << 4))
+	return nil
+}
+func plaExec(ctx *clientContext, op operand) error {
+	v, err := ctx.pull(true)
+	if err != nil {
+		return err
+	}
+	ctx.regA = v
+	ctx.setNZ(ctx.regA)
+	return nil
+}
+func plpExec(ctx *clientContext, op operand) error {
+	v, err := ctx.pull(true)
+	if err != nil {
+		return err
+	}
+	ctx.writeP(v)
 	return nil
 }

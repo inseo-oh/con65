@@ -607,9 +607,14 @@ func (ctx *clientContext) runNextInstr() error {
 			return err
 		}
 		operand = absXOperand{addr}
-		operandDisasm = fmt.Sprintf("%#04x,X", addr)
+		operandDisasm = fmt.Sprintf("%#04x,x", addr)
 	case addrmodeAbsY:
-		panic("todo")
+		addr, err := ctx.fetchInstrW()
+		if err != nil {
+			return err
+		}
+		operand = absYOperand{addr}
+		operandDisasm = fmt.Sprintf("%#04x,y", addr)
 	case addrmodeAbsInd:
 		panic("todo")
 	case addrmodeRel:
@@ -627,13 +632,23 @@ func (ctx *clientContext) runNextInstr() error {
 			return err
 		}
 		operand = zpXOperand{addr}
-		operandDisasm = fmt.Sprintf("%#02x,X", addr)
+		operandDisasm = fmt.Sprintf("%#02x,x", addr)
 	case addrmodeZpY:
 		panic("todo")
 	case addrmodeZpXInd:
-		panic("todo")
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpXIndOperand{addr}
+		operandDisasm = fmt.Sprintf("(%#02x,x)", addr)
 	case addrmodeZpIndY:
-		panic("todo")
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpIndYOperand{addr}
+		operandDisasm = fmt.Sprintf("(%#02x),y", addr)
 	default:
 		panic("bad addrmode value")
 	}
@@ -770,6 +785,39 @@ func (op absXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) e
 	return ctx.writeMemB(addr, v)
 }
 
+// Absolute, Y indexed --------------------------------------------------------------------
+type absYOperand struct{ addr uint16 }
+
+func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
+	addrH := (op.addr & 0xff00)
+	addrL := (op.addr & 0xff) + uint16(ctx.regY)
+	isPageCross := (addrL & 0xff00) != 0
+	if isPageCross || isWrite {
+		ctx.readMemB((addrL & 0xff) | addrH) // Dummy read
+		addrL &= 0xff
+		if isPageCross {
+			addrH += 0x0100
+		}
+	}
+	return addrL | addrH
+}
+func (op absYOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.readMemB(op.getAddr(ctx, false))
+}
+func (op absYOperand) write(ctx *clientContext, v uint8) error {
+	return ctx.writeMemB(op.getAddr(ctx, true), v)
+}
+func (op absYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr := op.getAddr(ctx, true)
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
 // Zeropage --------------------------------------------------------------------
 type zpOperand struct{ addr uint8 }
 
@@ -793,18 +841,124 @@ func (op zpOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) err
 // Zeropage, X indexed ---------------------------------------------------------
 type zpXOperand struct{ addr uint8 }
 
-func (op zpXOperand) read(ctx *clientContext) (uint8, error) {
-	return ctx.readMemB(uint16(op.addr + ctx.regX))
-}
-func (op zpXOperand) write(ctx *clientContext, v uint8) error {
-	return ctx.writeMemB(uint16(op.addr+ctx.regX), v)
-}
-func (op zpXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpXOperand) getAddr(ctx *clientContext) uint16 {
 	addr8 := op.addr
 	ctx.readMemB(uint16(addr8)) // Dummy read
 	addr8 += ctx.regX
-	addr := uint16(addr8)
+	return uint16(addr8)
+}
+func (op zpXOperand) read(ctx *clientContext) (uint8, error) {
+	addr := op.getAddr(ctx)
+	return ctx.readMemB(addr)
+}
+func (op zpXOperand) write(ctx *clientContext, v uint8) error {
+	addr := op.getAddr(ctx)
+	return ctx.writeMemB(addr, v)
+}
+func (op zpXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr := op.getAddr(ctx)
 
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage, X indexed indirect ------------------------------------------------
+type zpXIndOperand struct{ addr uint8 }
+
+func (op zpXIndOperand) getAddr(ctx *clientContext) (uint16, error) {
+	indAddr8 := op.addr
+	ctx.readMemB(uint16(indAddr8)) // Dummy read
+	indAddr8 += ctx.regX
+	realAddrL, err := ctx.readMemB(uint16(indAddr8))
+	if err != nil {
+		return 0, err
+	}
+	realAddrH, err := ctx.readMemB(uint16(indAddr8 + 1))
+	if err != nil {
+		return 0, err
+	}
+	realAddr := (uint16(realAddrH) << 8) | uint16(realAddrL)
+	return realAddr, nil
+}
+func (op zpXIndOperand) read(ctx *clientContext) (uint8, error) {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return ctx.readMemB(addr)
+}
+func (op zpXIndOperand) write(ctx *clientContext, v uint8) error {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return err
+	}
+	return ctx.writeMemB(addr, v)
+}
+func (op zpXIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return err
+	}
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage, X indexed indirect ------------------------------------------------
+type zpIndYOperand struct{ addr uint8 }
+
+func (op zpIndYOperand) getAddr(ctx *clientContext, isWrite bool) (uint16, error) {
+	indAddr8 := op.addr
+	realAddrL, err := ctx.readMemB(uint16(indAddr8))
+	if err != nil {
+		return 0, err
+	}
+	realAddrH, err := ctx.readMemB(uint16(indAddr8 + 1))
+	if err != nil {
+		return 0, err
+	}
+	newAddrL := uint16(realAddrL) + uint16(ctx.regY)
+	isPageCrossed := (newAddrL & 0xff00) != 0
+	if isPageCrossed || isWrite {
+		ctx.readMemB((newAddrL & 0xff) | (uint16(realAddrH) << 8)) // Dummy read
+		if isPageCrossed {
+			newAddrL &= 0xff
+			realAddrH++
+		}
+	}
+	realAddrL = uint8(newAddrL)
+	realAddr := (uint16(realAddrH) << 8) | uint16(realAddrL)
+
+	return realAddr, nil
+}
+func (op zpIndYOperand) read(ctx *clientContext) (uint8, error) {
+	addr, err := op.getAddr(ctx, false)
+	if err != nil {
+		return 0, err
+	}
+	return ctx.readMemB(addr)
+}
+func (op zpIndYOperand) write(ctx *clientContext, v uint8) error {
+	addr, err := op.getAddr(ctx, true)
+	if err != nil {
+		return err
+	}
+	return ctx.writeMemB(addr, v)
+}
+func (op zpIndYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr, err := op.getAddr(ctx, true)
+	if err != nil {
+		return err
+	}
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
@@ -831,6 +985,33 @@ func initInstrTable() {
 	instrs[0x56] = &instr{"lsr", lsrExec, addrmodeZpX}
 	instrs[0x4e] = &instr{"lsr", lsrExec, addrmodeAbs}
 	instrs[0x5e] = &instr{"lsr", lsrExec, addrmodeAbsX}
+	// AND ---------------------------------------------------------------------
+	instrs[0x29] = &instr{"and", andExec, addrmodeImm}
+	instrs[0x25] = &instr{"and", andExec, addrmodeZp}
+	instrs[0x35] = &instr{"and", andExec, addrmodeZpX}
+	instrs[0x2d] = &instr{"and", andExec, addrmodeAbs}
+	instrs[0x3d] = &instr{"and", andExec, addrmodeAbsX}
+	instrs[0x39] = &instr{"and", andExec, addrmodeAbsY}
+	instrs[0x21] = &instr{"and", andExec, addrmodeZpXInd}
+	instrs[0x31] = &instr{"and", andExec, addrmodeZpIndY}
+	// EOR ---------------------------------------------------------------------
+	instrs[0x49] = &instr{"eor", eorExec, addrmodeImm}
+	instrs[0x45] = &instr{"eor", eorExec, addrmodeZp}
+	instrs[0x55] = &instr{"eor", eorExec, addrmodeZpX}
+	instrs[0x4d] = &instr{"eor", eorExec, addrmodeAbs}
+	instrs[0x5d] = &instr{"eor", eorExec, addrmodeAbsX}
+	instrs[0x59] = &instr{"eor", eorExec, addrmodeAbsY}
+	instrs[0x41] = &instr{"eor", eorExec, addrmodeZpXInd}
+	instrs[0x51] = &instr{"eor", eorExec, addrmodeZpIndY}
+	// ORA ---------------------------------------------------------------------
+	instrs[0x09] = &instr{"ora", oraExec, addrmodeImm}
+	instrs[0x05] = &instr{"ora", oraExec, addrmodeZp}
+	instrs[0x15] = &instr{"ora", oraExec, addrmodeZpX}
+	instrs[0x0d] = &instr{"ora", oraExec, addrmodeAbs}
+	instrs[0x1d] = &instr{"ora", oraExec, addrmodeAbsX}
+	instrs[0x19] = &instr{"ora", oraExec, addrmodeAbsY}
+	instrs[0x01] = &instr{"ora", oraExec, addrmodeZpXInd}
+	instrs[0x11] = &instr{"ora", oraExec, addrmodeZpIndY}
 	// NOP ---------------------------------------------------------------------
 	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
 }
@@ -864,8 +1045,40 @@ func lsrExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
-// ADC -------------------------------------------------------------------------
+// AND -------------------------------------------------------------------------
+func andExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA &= rhs
+	ctx.setNZ(ctx.regA)
+	return nil
+}
 
+// EOR -------------------------------------------------------------------------
+func eorExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA ^= rhs
+	ctx.setNZ(ctx.regA)
+	return nil
+}
+
+// ORA -------------------------------------------------------------------------
+func oraExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA |= rhs
+	ctx.setNZ(ctx.regA)
+	return nil
+}
+
+// ADC -------------------------------------------------------------------------
 func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
 	carryVal := uint8(0)
 	if carryIn {

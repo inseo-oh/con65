@@ -825,6 +825,12 @@ func initInstrTable() {
 	instrs[0x16] = &instr{"asl", aslExec, addrmodeZpX}
 	instrs[0x0e] = &instr{"asl", aslExec, addrmodeAbs}
 	instrs[0x1e] = &instr{"asl", aslExec, addrmodeAbsX}
+	// LSR ---------------------------------------------------------------------
+	instrs[0x4a] = &instr{"lsr", lsrExec, addrmodeAcc}
+	instrs[0x46] = &instr{"lsr", lsrExec, addrmodeZp}
+	instrs[0x56] = &instr{"lsr", lsrExec, addrmodeZpX}
+	instrs[0x4e] = &instr{"lsr", lsrExec, addrmodeAbs}
+	instrs[0x5e] = &instr{"lsr", lsrExec, addrmodeAbsX}
 	// NOP ---------------------------------------------------------------------
 	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
 }
@@ -841,6 +847,18 @@ func aslExec(ctx *clientContext, op operand) error {
 		oldBit7 := (old & 0x80) != 0
 		ctx.setNZ(res)
 		ctx.flagC = oldBit7
+		return res
+	})
+	return nil
+}
+
+// LSR -------------------------------------------------------------------------
+func lsrExec(ctx *clientContext, op operand) error {
+	op.readModifyWrite(ctx, func(old uint8) uint8 {
+		res := old >> 1
+		oldBit0 := (old & 0x1) != 0
+		ctx.setNZ(res)
+		ctx.flagC = oldBit0
 		return res
 	})
 	return nil

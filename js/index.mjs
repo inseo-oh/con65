@@ -1,3 +1,4 @@
+// Copyright (c) 2025, Oh Inseo (YJK) -- Licensed under BSD-2-Clause
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import CPUClient from './cpu.mjs';

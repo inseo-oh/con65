@@ -1,3 +1,4 @@
+// Copyright (c) 2025, Oh Inseo (YJK) -- Licensed under BSD-2-Clause
 package main
 
 import (

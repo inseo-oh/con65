@@ -1067,6 +1067,10 @@ func initInstrTable() {
 	instrs[0x38] = &instr{"sec", secExec, addrmodeImp}
 	instrs[0xf8] = &instr{"sed", sedExec, addrmodeImp}
 	instrs[0x78] = &instr{"sei", seiExec, addrmodeImp}
+	instrs[0xca] = &instr{"dex", dexExec, addrmodeImp}
+	instrs[0x88] = &instr{"dey", deyExec, addrmodeImp}
+	instrs[0xe8] = &instr{"inx", inxExec, addrmodeImp}
+	instrs[0xc8] = &instr{"iny", inyExec, addrmodeImp}
 
 }
 
@@ -1261,5 +1265,25 @@ func sedExec(ctx *clientContext, op operand) error {
 }
 func seiExec(ctx *clientContext, op operand) error {
 	ctx.flagI = true
+	return nil
+}
+func dexExec(ctx *clientContext, op operand) error {
+	ctx.regX--
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+func deyExec(ctx *clientContext, op operand) error {
+	ctx.regY--
+	ctx.setNZ(ctx.regY)
+	return nil
+}
+func inxExec(ctx *clientContext, op operand) error {
+	ctx.regX++
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+func inyExec(ctx *clientContext, op operand) error {
+	ctx.regY++
+	ctx.setNZ(ctx.regY)
 	return nil
 }

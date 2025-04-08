@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import CPUClient from './cpu.mjs';
 
-const SKIP_DECIMAL_TESTS = true;
+const SKIP_DECIMAL_TESTS = false;
 const TEST_TIME_LIMIT = 1; // Seconds
 const servAddr = '127.0.0.1';
 let testPaths = [];
@@ -206,7 +206,7 @@ async function runTestFile(filename, fileText) {
             compareReg('a', final.a, () => cpu.readA()),
             compareReg('x', final.x, () => cpu.readX()),
             compareReg('y', final.y, () => cpu.readY()),
-            compareReg('p', final.p, () => cpu.readP())
+            compareReg('p', (final.p & 0xcf) | 0x20, () => cpu.readP())
         );
 
         try {

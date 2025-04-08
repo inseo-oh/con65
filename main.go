@@ -1246,7 +1246,6 @@ func initInstrTable() {
 	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
 	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
 	// Instructions with implied operands --------------------------------------
-	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
 	instrs[0x18] = &instr{"clc", clcExec, addrmodeImp}
 	instrs[0xd8] = &instr{"cld", cldExec, addrmodeImp}
 	instrs[0x58] = &instr{"cli", cliExec, addrmodeImp}
@@ -1271,6 +1270,36 @@ func initInstrTable() {
 	instrs[0x9a] = &instr{"tax", txsExec, addrmodeImp}
 	instrs[0x98] = &instr{"tax", tyaExec, addrmodeImp}
 	instrs[0x00] = &instr{"brk", brkExec, addrmodeImp}
+	// NOP(s) ------------------------------------------------------------------
+	// Only the first one is official opcode. Rest of them are NMOS specific, undefined opcode
+	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
+	instrs[0x1a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0x3a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0x5a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0x7a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0xda] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0xfa] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
+	instrs[0x80] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
+	instrs[0x82] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
+	instrs[0x89] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
+	instrs[0xc2] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
+	instrs[0xe2] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
+	instrs[0x04] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
+	instrs[0x44] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
+	instrs[0x64] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
+	instrs[0x14] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0x34] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0x54] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0x74] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0xd4] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0xf4] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
+	instrs[0x0c] = &instr{"nop", nopExecWithOp, addrmodeAbs}  // Undefined opcode
+	instrs[0x1c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	instrs[0x3c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	instrs[0x5c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	instrs[0x7c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	instrs[0xdc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	instrs[0xfc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
@@ -1579,6 +1608,10 @@ func bitExec(ctx *clientContext, op operand) error {
 
 // Instructions with implied operands ------------------------------------------
 func nopExec(ctx *clientContext, op operand) error {
+	return nil
+}
+func nopExecWithOp(ctx *clientContext, op operand) error {
+	op.read(ctx) // Dummy read
 	return nil
 }
 func clcExec(ctx *clientContext, op operand) error {

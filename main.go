@@ -1106,7 +1106,12 @@ func initInstrTable() {
 	instrs[0x28] = &instr{"plp", plpExec, addrmodeImp}
 	instrs[0x40] = &instr{"rti", rtiExec, addrmodeImp}
 	instrs[0x60] = &instr{"rts", rtsExec, addrmodeImp}
-
+	instrs[0xaa] = &instr{"tax", taxExec, addrmodeImp}
+	instrs[0xa8] = &instr{"tax", tayExec, addrmodeImp}
+	instrs[0xba] = &instr{"tax", tsxExec, addrmodeImp}
+	instrs[0x8a] = &instr{"tax", txaExec, addrmodeImp}
+	instrs[0x9a] = &instr{"tax", txsExec, addrmodeImp}
+	instrs[0x98] = &instr{"tax", tyaExec, addrmodeImp}
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
@@ -1366,5 +1371,34 @@ func rtsExec(ctx *clientContext, op operand) error {
 	// JSR pushes (return address - 1), so we have to add 1 back.
 	ctx.regPC += 1
 
+	return nil
+}
+func taxExec(ctx *clientContext, op operand) error {
+	ctx.regX = ctx.regA
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+func tayExec(ctx *clientContext, op operand) error {
+	ctx.regY = ctx.regA
+	ctx.setNZ(ctx.regY)
+	return nil
+}
+func tsxExec(ctx *clientContext, op operand) error {
+	ctx.regX = ctx.regS
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+func txaExec(ctx *clientContext, op operand) error {
+	ctx.regA = ctx.regX
+	ctx.setNZ(ctx.regA)
+	return nil
+}
+func txsExec(ctx *clientContext, op operand) error {
+	ctx.regS = ctx.regX
+	return nil
+}
+func tyaExec(ctx *clientContext, op operand) error {
+	ctx.regA = ctx.regY
+	ctx.setNZ(ctx.regA)
 	return nil
 }

@@ -618,7 +618,12 @@ func (ctx *clientContext) runNextInstr() error {
 	case addrmodeAbsInd:
 		panic("todo")
 	case addrmodeRel:
-		panic("todo")
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = relOperand{addr}
+		operandDisasm = fmt.Sprintf("%#02x", addr)
 	case addrmodeZp:
 		addr, err := ctx.fetchInstrB()
 		if err != nil {
@@ -691,6 +696,26 @@ type operand interface {
 	readModifyWrite(ctx *clientContext, f func(uint8) uint8) error
 }
 
+// Relative --------------------------------------------------------------------
+type relOperand struct{ rel uint8 }
+
+func getRelOperand(op operand) relOperand {
+	rel, ok := op.(relOperand)
+	if !ok {
+		panic("invalid cast")
+	}
+	return rel
+}
+func (op relOperand) read(ctx *clientContext) (uint8, error) {
+	panic("attempted to read/write on an relative operand")
+}
+func (op relOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to read/write on an relative operand")
+}
+func (op relOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	panic("attempted to read/write on an relative operand")
+}
+
 // Implied ---------------------------------------------------------------------
 type impOperand struct{}
 
@@ -756,17 +781,17 @@ func (op absOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) er
 type absXOperand struct{ addr uint16 }
 
 func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
-	addrH := (op.addr & 0xff00)
-	addrL := (op.addr & 0xff) + uint16(ctx.regX)
-	isPageCross := (addrL & 0xff00) != 0
+	addrH16 := ((op.addr & 0xff00) >> 8)
+	addrL16 := (op.addr & 0xff) + uint16(ctx.regX)
+	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
-		ctx.readMemB((addrL & 0xff) | addrH) // Dummy read
-		addrL &= 0xff
+		addrL16 &= 0xff
+		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		if isPageCross {
-			addrH += 0x0100
+			addrH16++
 		}
 	}
-	return addrL | addrH
+	return addrL16 | (addrH16 << 8)
 }
 func (op absXOperand) read(ctx *clientContext) (uint8, error) {
 	return ctx.readMemB(op.getAddr(ctx, false))
@@ -789,17 +814,17 @@ func (op absXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) e
 type absYOperand struct{ addr uint16 }
 
 func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
-	addrH := (op.addr & 0xff00)
-	addrL := (op.addr & 0xff) + uint16(ctx.regY)
-	isPageCross := (addrL & 0xff00) != 0
+	addrH16 := (op.addr & 0xff00)
+	addrL16 := (op.addr & 0xff) + uint16(ctx.regY)
+	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
-		ctx.readMemB((addrL & 0xff) | addrH) // Dummy read
-		addrL &= 0xff
+		addrL16 &= 0xff
+		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		if isPageCross {
-			addrH += 0x0100
+			addrH16 += 0x0100
 		}
 	}
-	return addrL | addrH
+	return addrL16 | addrH16
 }
 func (op absYOperand) read(ctx *clientContext) (uint8, error) {
 	return ctx.readMemB(op.getAddr(ctx, false))
@@ -926,16 +951,16 @@ func (op zpIndYOperand) getAddr(ctx *clientContext, isWrite bool) (uint16, error
 	if err != nil {
 		return 0, err
 	}
-	newAddrL := uint16(realAddrL) + uint16(ctx.regY)
-	isPageCrossed := (newAddrL & 0xff00) != 0
-	if isPageCrossed || isWrite {
-		ctx.readMemB((newAddrL & 0xff) | (uint16(realAddrH) << 8)) // Dummy read
-		if isPageCrossed {
-			newAddrL &= 0xff
+	newAddrL16 := uint16(realAddrL) + uint16(ctx.regY)
+	isPageCross := (newAddrL16 & 0xff00) != 0
+	if isPageCross || isWrite {
+		newAddrL16 &= 0xff
+		ctx.readMemB(newAddrL16 | (uint16(realAddrH) << 8)) // Dummy read
+		if isPageCross {
 			realAddrH++
 		}
 	}
-	realAddrL = uint8(newAddrL)
+	realAddrL = uint8(newAddrL16)
 	realAddr := (uint16(realAddrH) << 8) | uint16(realAddrL)
 
 	return realAddr, nil
@@ -1024,13 +1049,76 @@ func initInstrTable() {
 	instrs[0x19] = &instr{"ora", oraExec, addrmodeAbsY}
 	instrs[0x01] = &instr{"ora", oraExec, addrmodeZpXInd}
 	instrs[0x11] = &instr{"ora", oraExec, addrmodeZpIndY}
+	// Branch instructions -----------------------------------------------------
+	instrs[0xb0] = &instr{"bcs", bcsExec, addrmodeRel}
+	instrs[0x90] = &instr{"bcc", bccExec, addrmodeRel}
+	instrs[0xf0] = &instr{"beq", beqExec, addrmodeRel}
+	instrs[0xd0] = &instr{"bne", bneExec, addrmodeRel}
+	instrs[0x10] = &instr{"bpl", bplExec, addrmodeRel}
+	instrs[0x30] = &instr{"bmi", bmiExec, addrmodeRel}
+	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
+	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
+
 	// NOP ---------------------------------------------------------------------
 	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
+
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
 	ctx.flagN = (v >> 7) != 0
 	ctx.flagZ = v == 0x00
+}
+
+// Branch operations -----------------------------------------------------------
+func signExtBtoW(v uint8) uint16 {
+	return uint16(int16(int8(v)))
+}
+
+func doBranch(ctx *clientContext, op operand, cond bool) {
+	rel := getRelOperand(op)
+	if !cond {
+		return
+	}
+	ctx.readMemB(ctx.regPC) // Dummy read
+	oldPcH := uint8(ctx.regPC >> 8)
+	ctx.regPC += signExtBtoW(rel.rel)
+	newPcH := uint8(ctx.regPC >> 8)
+	isPageCross := oldPcH != newPcH
+	if isPageCross {
+		ctx.readMemB((ctx.regPC & 0xff) | uint16(oldPcH)<<8) // Dummy read
+	}
+}
+func bcsExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, ctx.flagC)
+	return nil
+}
+func bccExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, !ctx.flagC)
+	return nil
+}
+func beqExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, ctx.flagZ)
+	return nil
+}
+func bneExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, !ctx.flagZ)
+	return nil
+}
+func bmiExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, ctx.flagN)
+	return nil
+}
+func bplExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, !ctx.flagN)
+	return nil
+}
+func bvsExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, ctx.flagV)
+	return nil
+}
+func bvcExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, !ctx.flagV)
+	return nil
 }
 
 // ASL -------------------------------------------------------------------------

@@ -50,11 +50,63 @@ type clientContext struct {
 	regX  uint8  // X register
 	regY  uint8  // Y register
 	regS  uint8  // Stack pointer
-	regP  uint8  // Processor status
 	regPC uint16 // Program counter
 
-	//
+	// Processor flags (P register) --------------------------------------------
+	flagN bool
+	flagV bool
+	flagD bool
+	flagI bool
+	flagZ bool
+	flagC bool
+
+	// Other flags -------------------------------------------------------------
 	traceExec bool
+}
+
+//==============================================================================
+// Processor status register
+//==============================================================================
+
+const (
+	pFlagN = uint8(1 << 7)
+	pFlagV = uint8(1 << 6)
+	pFlagB = uint8(1 << 4) // Not an actual flag, but set by BRK and PHP
+	pFlagD = uint8(1 << 3)
+	pFlagI = uint8(1 << 2)
+	pFlagZ = uint8(1 << 1)
+	pFlagC = uint8(1 << 0)
+)
+
+func (ctx *clientContext) readP() uint8 {
+	flags := uint8(0x20)
+	if ctx.flagN {
+		flags |= pFlagN
+	}
+	if ctx.flagV {
+		flags |= pFlagV
+	}
+	if ctx.flagD {
+		flags |= pFlagD
+	}
+	if ctx.flagI {
+		flags |= pFlagI
+	}
+	if ctx.flagZ {
+		flags |= pFlagZ
+	}
+	if ctx.flagC {
+		flags |= pFlagC
+	}
+	return flags
+}
+func (ctx *clientContext) writeP(v uint8) {
+	ctx.flagN = (v & pFlagN) != 0
+	ctx.flagV = (v & pFlagV) != 0
+	ctx.flagD = (v & pFlagD) != 0
+	ctx.flagI = (v & pFlagI) != 0
+	ctx.flagZ = (v & pFlagZ) != 0
+	ctx.flagC = (v & pFlagC) != 0
 }
 
 //==============================================================================
@@ -316,7 +368,7 @@ func (ctx *clientContext) serveNextCmd(logger *log.Logger) error {
 		if debugNetmsg {
 			logger.Printf("WriteP %#x", val)
 		}
-		ctx.regP = val
+		ctx.writeP(val)
 		res := newNetAckResponse(0)
 		if err := ctx.out(res); err != nil {
 			return err
@@ -327,7 +379,7 @@ func (ctx *clientContext) serveNextCmd(logger *log.Logger) error {
 			logger.Printf("ReadP")
 		}
 		res := newNetAckResponse(1)
-		res.appendB(ctx.regP)
+		res.appendB(ctx.readP())
 		if err := ctx.out(res); err != nil {
 			return err
 		}
@@ -494,11 +546,6 @@ type instr struct {
 
 var instrs [256]*instr
 
-func initInstrTable() {
-	// NOP ---------------------------------------------------------------------
-	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
-}
-
 func (ctx *clientContext) fetchInstrB() (uint8, error) {
 	res, err := ctx.readMemB(ctx.regPC)
 	if err != nil {
@@ -514,10 +561,6 @@ func (ctx *clientContext) fetchInstrW() (uint16, error) {
 	}
 	ctx.regPC += 2
 	return res, nil
-}
-
-func (ctx *clientContext) dummyReadAtPc() {
-	ctx.readMemB(ctx.regPC) // Dummy cycle
 }
 
 func (ctx *clientContext) runNextInstr() error {
@@ -537,11 +580,11 @@ func (ctx *clientContext) runNextInstr() error {
 	operandDisasm := ""
 	switch instr.addrmode {
 	case addrmodeImp:
-		ctx.dummyReadAtPc()
+		ctx.readMemB(ctx.regPC) // Dummy read
 		operand = impOperand{}
 		operandDisasm = ""
 	case addrmodeAcc:
-		ctx.dummyReadAtPc()
+		ctx.readMemB(ctx.regPC) // Dummy read
 		operand = accOperand{}
 		operandDisasm = "A"
 	case addrmodeImm:
@@ -550,16 +593,21 @@ func (ctx *clientContext) runNextInstr() error {
 			return err
 		}
 		operand = immOperand{val}
-		operandDisasm = fmt.Sprintf("#%#04x", val)
+		operandDisasm = fmt.Sprintf("#%#02x", val)
 	case addrmodeAbs:
 		addr, err := ctx.fetchInstrW()
 		if err != nil {
 			return err
 		}
 		operand = absOperand{addr}
-		operandDisasm = fmt.Sprintf("#%#06x", addr)
+		operandDisasm = fmt.Sprintf("%#04x", addr)
 	case addrmodeAbsX:
-		panic("todo")
+		addr, err := ctx.fetchInstrW()
+		if err != nil {
+			return err
+		}
+		operand = absXOperand{addr}
+		operandDisasm = fmt.Sprintf("%#04x,X", addr)
 	case addrmodeAbsY:
 		panic("todo")
 	case addrmodeAbsInd:
@@ -567,11 +615,27 @@ func (ctx *clientContext) runNextInstr() error {
 	case addrmodeRel:
 		panic("todo")
 	case addrmodeZp:
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpOperand{addr}
+		operandDisasm = fmt.Sprintf("%#02x", addr)
+	case addrmodeZpX:
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpXOperand{addr}
+		operandDisasm = fmt.Sprintf("%#02x,X", addr)
+	case addrmodeZpY:
 		panic("todo")
 	case addrmodeZpXInd:
 		panic("todo")
 	case addrmodeZpIndY:
 		panic("todo")
+	default:
+		panic("bad addrmode value")
 	}
 	// Emit trace execution event ----------------------------------------------
 	if ctx.traceExec {
@@ -663,17 +727,124 @@ func (op absOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(op.addr, v)
 }
 func (op absOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
-	v, err := ctx.readMemB(op.addr)
+	addr := op.addr
+	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
+	ctx.writeMemB(addr, v)
 	v = f(v)
-	return ctx.writeMemB(op.addr, v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Absolute, X indexed --------------------------------------------------------------------
+type absXOperand struct{ addr uint16 }
+
+func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
+	addrH := (op.addr & 0xff00)
+	addrL := (op.addr & 0xff) + uint16(ctx.regX)
+	isPageCross := (addrL & 0xff00) != 0
+	if isPageCross || isWrite {
+		ctx.readMemB((addrL & 0xff) | addrH) // Dummy read
+		addrL &= 0xff
+		if isPageCross {
+			addrH += 0x0100
+		}
+	}
+	return addrL | addrH
+}
+func (op absXOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.readMemB(op.getAddr(ctx, false))
+}
+func (op absXOperand) write(ctx *clientContext, v uint8) error {
+	return ctx.writeMemB(op.getAddr(ctx, true), v)
+}
+func (op absXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr := op.getAddr(ctx, true)
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage --------------------------------------------------------------------
+type zpOperand struct{ addr uint8 }
+
+func (op zpOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.readMemB(uint16(op.addr))
+}
+func (op zpOperand) write(ctx *clientContext, v uint8) error {
+	return ctx.writeMemB(uint16(op.addr), v)
+}
+func (op zpOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr := uint16(op.addr)
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage, X indexed ---------------------------------------------------------
+type zpXOperand struct{ addr uint8 }
+
+func (op zpXOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.readMemB(uint16(op.addr + ctx.regX))
+}
+func (op zpXOperand) write(ctx *clientContext, v uint8) error {
+	return ctx.writeMemB(uint16(op.addr+ctx.regX), v)
+}
+func (op zpXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr8 := op.addr
+	ctx.readMemB(uint16(addr8)) // Dummy read
+	addr8 += ctx.regX
+	addr := uint16(addr8)
+
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
 }
 
 //==============================================================================
 // Instruction implementation
 //==============================================================================
+
+func initInstrTable() {
+	// ASL ---------------------------------------------------------------------
+	instrs[0x0a] = &instr{"asl", aslExec, addrmodeAcc}
+	instrs[0x06] = &instr{"asl", aslExec, addrmodeZp}
+	instrs[0x16] = &instr{"asl", aslExec, addrmodeZpX}
+	instrs[0x0e] = &instr{"asl", aslExec, addrmodeAbs}
+	instrs[0x1e] = &instr{"asl", aslExec, addrmodeAbsX}
+	// NOP ---------------------------------------------------------------------
+	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
+}
+
+func (ctx *clientContext) setNZ(v uint8) {
+	ctx.flagN = (v >> 7) != 0
+	ctx.flagZ = v == 0x00
+}
+
+// ASL -------------------------------------------------------------------------
+func aslExec(ctx *clientContext, op operand) error {
+	op.readModifyWrite(ctx, func(old uint8) uint8 {
+		res := old << 1
+		oldBit7 := (old & 0x80) != 0
+		ctx.setNZ(res)
+		ctx.flagC = oldBit7
+		return res
+	})
+	return nil
+}
 
 // ADC -------------------------------------------------------------------------
 

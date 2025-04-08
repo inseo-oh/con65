@@ -124,6 +124,19 @@ func (ctx *clientContext) pull(isFirstPull bool) (uint8, error) {
 	ctx.regS++
 	return ctx.readMemB(0x100 + uint16(ctx.regS))
 }
+func (ctx *clientContext) pullPc(isFirstPull bool) error {
+	if v, err := ctx.pull(isFirstPull); err != nil {
+		return err
+	} else {
+		ctx.regPC = uint16(v)
+	}
+	if v, err := ctx.pull(false); err != nil {
+		return err
+	} else {
+		ctx.regPC |= uint16(v) << 8
+	}
+	return nil
+}
 
 //==============================================================================
 // Memory bus
@@ -1091,6 +1104,8 @@ func initInstrTable() {
 	instrs[0x08] = &instr{"php", phpExec, addrmodeImp}
 	instrs[0x68] = &instr{"pla", plaExec, addrmodeImp}
 	instrs[0x28] = &instr{"plp", plpExec, addrmodeImp}
+	instrs[0x40] = &instr{"rti", rtiExec, addrmodeImp}
+	instrs[0x60] = &instr{"rts", rtsExec, addrmodeImp}
 
 }
 
@@ -1330,5 +1345,26 @@ func plpExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	ctx.writeP(v)
+	return nil
+}
+func rtiExec(ctx *clientContext, op operand) error {
+	v, err := ctx.pull(true)
+	if err != nil {
+		return err
+	}
+	ctx.writeP(v)
+	if err := ctx.pullPc(false); err != nil {
+		return err
+	}
+	return nil
+}
+func rtsExec(ctx *clientContext, op operand) error {
+	if err := ctx.pullPc(true); err != nil {
+		return err
+	}
+	ctx.readMemB(ctx.regPC) // Dummy read
+	// JSR pushes (return address - 1), so we have to add 1 back.
+	ctx.regPC += 1
+
 	return nil
 }

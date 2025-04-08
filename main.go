@@ -1058,9 +1058,15 @@ func initInstrTable() {
 	instrs[0x30] = &instr{"bmi", bmiExec, addrmodeRel}
 	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
 	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
-
-	// NOP ---------------------------------------------------------------------
+	// Misc --------------------------------------------------------------------
 	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
+	instrs[0x18] = &instr{"clc", clcExec, addrmodeImp}
+	instrs[0xd8] = &instr{"cld", cldExec, addrmodeImp}
+	instrs[0x58] = &instr{"cli", cliExec, addrmodeImp}
+	instrs[0xb8] = &instr{"clv", clvExec, addrmodeImp}
+	instrs[0x38] = &instr{"sec", secExec, addrmodeImp}
+	instrs[0xf8] = &instr{"sed", sedExec, addrmodeImp}
+	instrs[0x78] = &instr{"sei", seiExec, addrmodeImp}
 
 }
 
@@ -1225,7 +1231,35 @@ func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow b
 	return
 }
 
-// NOP -------------------------------------------------------------------------
+// Misc ------------------------------------------------------------------------
 func nopExec(ctx *clientContext, op operand) error {
+	return nil
+}
+func clcExec(ctx *clientContext, op operand) error {
+	ctx.flagC = false
+	return nil
+}
+func cldExec(ctx *clientContext, op operand) error {
+	ctx.flagD = false
+	return nil
+}
+func cliExec(ctx *clientContext, op operand) error {
+	ctx.flagI = false
+	return nil
+}
+func clvExec(ctx *clientContext, op operand) error {
+	ctx.flagV = false
+	return nil
+}
+func secExec(ctx *clientContext, op operand) error {
+	ctx.flagC = true
+	return nil
+}
+func sedExec(ctx *clientContext, op operand) error {
+	ctx.flagD = true
+	return nil
+}
+func seiExec(ctx *clientContext, op operand) error {
+	ctx.flagI = true
 	return nil
 }

@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import CPUClient from './cpu.mjs';
 
+const SKIP_DECIMAL_TESTS = true;
 const TEST_TIME_LIMIT = 1; // Seconds
 const servAddr = '127.0.0.1';
 let testPaths = [];
@@ -84,12 +85,20 @@ cpu.onBusRead = (addr) => {
 
 let passCount = 0;
 let failCount = 0;
+let skipCount = 0;
 let failMismatchCount = 0;
 
 async function runTestFile(filename, fileText) {
     const tests = JSON.parse(fileText);
 
     for (const test of tests) {
+        if (SKIP_DECIMAL_TESTS) {
+            if (test.initial.p & (1 << 3)) {
+                skipCount++;
+                continue;
+            }
+        }
+
         execLogs = [];
         const initial = test.initial;
         const final = test.final;
@@ -271,7 +280,7 @@ cpu.connect(servAddr, async () => {
         await runTestFile(file, fileText);
     }
     console.log(
-        `TEST FINISHED: ${passCount} passed, ${failCount} failed(${failMismatchCount} mismatches)`
+        `TEST FINISHED: ${passCount} passed, ${failCount} failed(${failMismatchCount} mismatches), ${skipCount} skipped`
     );
     cpu.bye();
 

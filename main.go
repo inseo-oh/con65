@@ -65,6 +65,11 @@ type clientContext struct {
 	traceExec bool
 }
 
+const (
+	RESET_VECTOR = uint16(0xfffc)
+	BRK_VECTOR   = uint16(0xfffe)
+)
+
 //==============================================================================
 // Processor status register
 //==============================================================================
@@ -1193,6 +1198,44 @@ func initInstrTable() {
 	instrs[0x6c] = &instr{"jmp", jmpExec, addrmodeAbsInd}
 	// JSR ---------------------------------------------------------------------
 	instrs[0x20] = &instr{"jsr", jsrExec, addrmodeAbs}
+	// ADC ---------------------------------------------------------------------
+	instrs[0x69] = &instr{"adc", adcExec, addrmodeImm}
+	instrs[0x65] = &instr{"adc", adcExec, addrmodeZp}
+	instrs[0x75] = &instr{"adc", adcExec, addrmodeZpX}
+	instrs[0x6d] = &instr{"adc", adcExec, addrmodeAbs}
+	instrs[0x7d] = &instr{"adc", adcExec, addrmodeAbsX}
+	instrs[0x79] = &instr{"adc", adcExec, addrmodeAbsY}
+	instrs[0x61] = &instr{"adc", adcExec, addrmodeZpXInd}
+	instrs[0x71] = &instr{"adc", adcExec, addrmodeZpIndY}
+	// SBC ---------------------------------------------------------------------
+	instrs[0xe9] = &instr{"sbc", sbcExec, addrmodeImm}
+	instrs[0xe5] = &instr{"sbc", sbcExec, addrmodeZp}
+	instrs[0xf5] = &instr{"sbc", sbcExec, addrmodeZpX}
+	instrs[0xed] = &instr{"sbc", sbcExec, addrmodeAbs}
+	instrs[0xfd] = &instr{"sbc", sbcExec, addrmodeAbsX}
+	instrs[0xf9] = &instr{"sbc", sbcExec, addrmodeAbsY}
+	instrs[0xe1] = &instr{"sbc", sbcExec, addrmodeZpXInd}
+	instrs[0xf1] = &instr{"sbc", sbcExec, addrmodeZpIndY}
+	// CMP ---------------------------------------------------------------------
+	instrs[0xc9] = &instr{"cmp", cmpExec, addrmodeImm}
+	instrs[0xc5] = &instr{"cmp", cmpExec, addrmodeZp}
+	instrs[0xd5] = &instr{"cmp", cmpExec, addrmodeZpX}
+	instrs[0xcd] = &instr{"cmp", cmpExec, addrmodeAbs}
+	instrs[0xdd] = &instr{"cmp", cmpExec, addrmodeAbsX}
+	instrs[0xd9] = &instr{"cmp", cmpExec, addrmodeAbsY}
+	instrs[0xc1] = &instr{"cmp", cmpExec, addrmodeZpXInd}
+	instrs[0xd1] = &instr{"cmp", cmpExec, addrmodeZpIndY}
+	// CPX ---------------------------------------------------------------------
+	instrs[0xe0] = &instr{"cpx", cpxExec, addrmodeImm}
+	instrs[0xe4] = &instr{"cpx", cpxExec, addrmodeZp}
+	instrs[0xec] = &instr{"cpx", cpxExec, addrmodeAbs}
+	// CPY---------------------------------------------------------------------
+	instrs[0xc0] = &instr{"cpy", cpyExec, addrmodeImm}
+	instrs[0xc4] = &instr{"cpy", cpyExec, addrmodeZp}
+	instrs[0xcc] = &instr{"cpy", cpyExec, addrmodeAbs}
+	// BIT ---------------------------------------------------------------------
+	instrs[0x24] = &instr{"bit", bitExec, addrmodeZp}
+	instrs[0x2c] = &instr{"bit", bitExec, addrmodeAbs}
 	// Branch instructions -----------------------------------------------------
 	instrs[0xb0] = &instr{"bcs", bcsExec, addrmodeRel}
 	instrs[0x90] = &instr{"bcc", bccExec, addrmodeRel}
@@ -1227,6 +1270,7 @@ func initInstrTable() {
 	instrs[0x8a] = &instr{"tax", txaExec, addrmodeImp}
 	instrs[0x9a] = &instr{"tax", txsExec, addrmodeImp}
 	instrs[0x98] = &instr{"tax", tyaExec, addrmodeImp}
+	instrs[0x00] = &instr{"brk", brkExec, addrmodeImp}
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
@@ -1459,19 +1503,78 @@ func jsrExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
-// ADC -------------------------------------------------------------------------
+// ADC, SBC, CMP ---------------------------------------------------------------
 func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
 	carryVal := uint8(0)
 	if carryIn {
 		carryVal = 1
 	}
-	result16 := uint16(lhs + rhs + carryVal)
+	result16 := uint16(lhs) + uint16(rhs) + uint16(carryVal)
 	carryOut = (result16 & 0xff00) != 0
 	res = uint8(result16)
 	overflow =
 		((lhs^rhs)&0x80 == 0) && // It's overflow if LHS and RHS signs are the same
 			((lhs^res)&0x80 != 0) // and resulting sign is different
 	return
+}
+func sbcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+	return adcImpl(lhs, ^rhs, carryIn)
+}
+func (ctx *clientContext) cmpImpl(op operand, lhs uint8) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	res, carry, _ := sbcImpl(lhs, rhs, true)
+	ctx.setNZ(res)
+	ctx.flagC = carry
+	return nil
+}
+func adcExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	res, carry, overflow := adcImpl(ctx.regA, rhs, ctx.flagC)
+	ctx.regA = res
+	ctx.flagC = carry
+	ctx.flagV = overflow
+	ctx.setNZ(res)
+	return nil
+}
+func sbcExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	res, carry, overflow := sbcImpl(ctx.regA, rhs, ctx.flagC)
+	ctx.regA = res
+	ctx.flagC = carry
+	ctx.flagV = overflow
+	ctx.setNZ(res)
+	return nil
+}
+func cmpExec(ctx *clientContext, op operand) error {
+	return ctx.cmpImpl(op, ctx.regA)
+}
+func cpxExec(ctx *clientContext, op operand) error {
+	return ctx.cmpImpl(op, ctx.regX)
+}
+func cpyExec(ctx *clientContext, op operand) error {
+	return ctx.cmpImpl(op, ctx.regY)
+}
+
+// BIT -------------------------------------------------------------------------
+func bitExec(ctx *clientContext, op operand) error {
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	res := ctx.regA & rhs
+	ctx.setNZ(res)
+	ctx.flagN = (rhs & 0x80) != 0
+	ctx.flagV = (rhs & 0x40) != 0
+	return nil
 }
 
 // Instructions with implied operands ------------------------------------------
@@ -1597,5 +1700,21 @@ func txsExec(ctx *clientContext, op operand) error {
 func tyaExec(ctx *clientContext, op operand) error {
 	ctx.regA = ctx.regY
 	ctx.setNZ(ctx.regA)
+	return nil
+}
+func brkExec(ctx *clientContext, op operand) error {
+	ctx.regPC++
+	if err := ctx.pushPc(); err != nil {
+		return err
+	}
+	if err := ctx.push(ctx.readP() | (1 << 4)); err != nil {
+		return err
+	}
+	ctx.flagI = true
+	if v, err := ctx.readMemW(BRK_VECTOR); err != nil {
+		return err
+	} else {
+		ctx.regPC = v
+	}
 	return nil
 }

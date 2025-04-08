@@ -1300,6 +1300,14 @@ func initInstrTable() {
 	instrs[0x7c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
 	instrs[0xdc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
 	instrs[0xfc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
+	// =========================================================================
+	// NMOS undefined opcodes
+	// =========================================================================
+	// ALR ---------------------------------------------------------------------
+	instrs[0x4b] = &instr{"nop", nmosAlrExec, addrmodeImm} // Undefined opcode
+	// ANC ---------------------------------------------------------------------
+	instrs[0x0b] = &instr{"nop", nmosAncExec, addrmodeImm} // Undefined opcode
+	instrs[0x2b] = &instr{"nop", nmosAncExec, addrmodeImm} // Undefined opcode
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
@@ -1749,5 +1757,41 @@ func brkExec(ctx *clientContext, op operand) error {
 	} else {
 		ctx.regPC = v
 	}
+	return nil
+}
+
+// ==============================================================================
+// NMOS undefined opcodes
+// ==============================================================================
+
+// AND + LSR
+func nmosAlrExec(ctx *clientContext, op operand) error {
+	// AND ---------------------------------------------------------------------
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA &= rhs
+	// LSR ---------------------------------------------------------------------
+	res := ctx.regA >> 1
+	oldBit0 := (ctx.regA & 0x1) != 0
+	ctx.regA = res
+	ctx.setNZ(res)
+	ctx.flagC = oldBit0
+	return nil
+}
+
+// AND + Set C like ASL
+func nmosAncExec(ctx *clientContext, op operand) error {
+	// AND ---------------------------------------------------------------------
+	rhs, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	ctx.regA &= rhs
+	ctx.setNZ(ctx.regA)
+	// Set C flag --------------------------------------------------------------
+	oldBit7 := (ctx.regA & 0x80) != 0
+	ctx.flagC = oldBit7
 	return nil
 }

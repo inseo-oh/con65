@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	initDecoders()
+	initInstrTable()
 
 	addr := "127.0.0.1:6502"
 	listener, err := net.Listen("tcp", addr)
@@ -483,20 +483,20 @@ func (ctx *clientContext) expectAckOrFail() error {
 }
 
 //==============================================================================
-// Instruction declaration & decoding
+// Instruction declaration, decoding, and execution
 //==============================================================================
 
-type instr interface {
-	disasm() string
-	exec(ctx *clientContext) error
+type instr struct {
+	name     string
+	execFn   func(ctx *clientContext, op operand) error
+	addrmode addrmode
 }
-type decoderFunc func(ctx *clientContext) (instr, error)
 
-var instrDecoders [256]decoderFunc
+var instrs [256]*instr
 
-func initDecoders() {
-	// NOP
-	instrDecoders[0xea] = decodeEaNop
+func initInstrTable() {
+	// NOP ---------------------------------------------------------------------
+	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
 }
 
 func (ctx *clientContext) fetchInstrB() (uint8, error) {
@@ -515,49 +515,183 @@ func (ctx *clientContext) fetchInstrW() (uint16, error) {
 	ctx.regPC += 2
 	return res, nil
 }
+
 func (ctx *clientContext) dummyReadAtPc() {
 	ctx.readMemB(ctx.regPC) // Dummy cycle
 }
 
 func (ctx *clientContext) runNextInstr() error {
 	instrPc := ctx.regPC
-	var decoder decoderFunc
+	// Fetch the opcode --------------------------------------------------------
+	var instr *instr
 	if v, err := ctx.fetchInstrB(); err != nil {
 		return err
 	} else {
-		decoder = instrDecoders[v]
-		if decoder == nil {
-			log.Panicf("decoder for opcode %#x is not implemented", v)
+		instr = instrs[v]
+		if instr == nil {
+			log.Panicf("opcode %#x is not implemented", v)
 		}
 	}
-	instr, err := decoder(ctx)
-	if err != nil {
-		return err
+	// Decode the operand ------------------------------------------------------
+	var operand operand
+	operandDisasm := ""
+	switch instr.addrmode {
+	case addrmodeImp:
+		ctx.dummyReadAtPc()
+		operand = impOperand{}
+		operandDisasm = ""
+	case addrmodeAcc:
+		ctx.dummyReadAtPc()
+		operand = accOperand{}
+		operandDisasm = "A"
+	case addrmodeImm:
+		val, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = immOperand{val}
+		operandDisasm = fmt.Sprintf("#%#04x", val)
+	case addrmodeAbs:
+		addr, err := ctx.fetchInstrW()
+		if err != nil {
+			return err
+		}
+		operand = absOperand{addr}
+		operandDisasm = fmt.Sprintf("#%#06x", addr)
+	case addrmodeAbsX:
+		panic("todo")
+	case addrmodeAbsY:
+		panic("todo")
+	case addrmodeAbsInd:
+		panic("todo")
+	case addrmodeRel:
+		panic("todo")
+	case addrmodeZp:
+		panic("todo")
+	case addrmodeZpXInd:
+		panic("todo")
+	case addrmodeZpIndY:
+		panic("todo")
 	}
+	// Emit trace execution event ----------------------------------------------
 	if ctx.traceExec {
-		disasm := instr.disasm()
+		disasm := fmt.Sprintf("%s %s", instr.name, operandDisasm)
 		if err := ctx.eventTraceExec(instrPc, ctx.ir, disasm); err != nil {
 			return err
 		}
 	}
-	return instr.exec(ctx)
+	// Execute -----------------------------------------------------------------
+	return instr.execFn(ctx, operand)
 }
 
-// NOP -------------------------------------------------------------------------
+//==============================================================================
+// Addressing modes
+//==============================================================================
 
-type instrNop struct {
+type addrmode uint8
+
+const (
+	addrmodeAcc    = addrmode(iota) // Accumulator
+	addrmodeAbs                     // Absolute
+	addrmodeAbsX                    // Absolute, X indexed
+	addrmodeAbsY                    // Absolute, Y indexed
+	addrmodeImm                     // Immediate
+	addrmodeImp                     // Implied
+	addrmodeAbsInd                  // (Absolute) Indirect
+	addrmodeZpXInd                  // (Zeropage) X indexed indirect
+	addrmodeZpIndY                  // (Zeropage) indirect Y indexed
+	addrmodeRel                     // Relative
+	addrmodeZp                      // Zeropage
+	addrmodeZpX                     // Zeropage, X indexed
+	addrmodeZpY                     // Zeropage, Y indexed
+)
+
+type operand interface {
+	read(ctx *clientContext) (uint8, error)
+	write(ctx *clientContext, v uint8) error
+	readModifyWrite(ctx *clientContext, f func(uint8) uint8) error
 }
 
-func (instr instrNop) disasm() string {
-	return "nop"
+// Implied ---------------------------------------------------------------------
+type impOperand struct{}
+
+func (op impOperand) read(ctx *clientContext) (uint8, error) {
+	panic("attempted to read/write on an implied operand")
+}
+func (op impOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to read/write on an implied operand")
+}
+func (op impOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	panic("attempted to read/write on an implied operand")
 }
 
-func (instr instrNop) exec(ctx *clientContext) error {
-	ctx.dummyReadAtPc()
+// Immediate ---------------------------------------------------------------------
+type immOperand struct{ val uint8 }
 
+func (op immOperand) read(ctx *clientContext) (uint8, error) {
+	return op.val, nil
+}
+func (op immOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to write on an implied operand")
+}
+func (op immOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	panic("attempted to write on an implied operand")
+}
+
+// Accumulator -----------------------------------------------------------------
+type accOperand struct{}
+
+func (op accOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.regA, nil
+}
+func (op accOperand) write(ctx *clientContext, v uint8) error {
+	ctx.regA = v
+	return nil
+}
+func (op accOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	ctx.regA = f(ctx.regA)
 	return nil
 }
 
-func decodeEaNop(ctx *clientContext) (instr, error) {
-	return instrNop{}, nil
+// Absolute --------------------------------------------------------------------
+type absOperand struct{ addr uint16 }
+
+func (op absOperand) read(ctx *clientContext) (uint8, error) {
+	return ctx.readMemB(op.addr)
+}
+func (op absOperand) write(ctx *clientContext, v uint8) error {
+	return ctx.writeMemB(op.addr, v)
+}
+func (op absOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	v, err := ctx.readMemB(op.addr)
+	if err != nil {
+		return err
+	}
+	v = f(v)
+	return ctx.writeMemB(op.addr, v)
+}
+
+//==============================================================================
+// Instruction implementation
+//==============================================================================
+
+// ADC -------------------------------------------------------------------------
+
+func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+	carryVal := uint8(0)
+	if carryIn {
+		carryVal = 1
+	}
+	result16 := uint16(lhs + rhs + carryVal)
+	carryOut = (result16 & 0xff00) != 0
+	res = uint8(result16)
+	overflow =
+		((lhs^rhs)&0x80 == 0) && // It's overflow if LHS and RHS signs are the same
+			((lhs^res)&0x80 != 0) // and resulting sign is different
+	return
+}
+
+// NOP -------------------------------------------------------------------------
+func nopExec(ctx *clientContext, op operand) error {
+	return nil
 }

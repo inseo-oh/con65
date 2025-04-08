@@ -985,6 +985,18 @@ func initInstrTable() {
 	instrs[0x56] = &instr{"lsr", lsrExec, addrmodeZpX}
 	instrs[0x4e] = &instr{"lsr", lsrExec, addrmodeAbs}
 	instrs[0x5e] = &instr{"lsr", lsrExec, addrmodeAbsX}
+	// ROL ---------------------------------------------------------------------
+	instrs[0x2a] = &instr{"rol", rolExec, addrmodeAcc}
+	instrs[0x26] = &instr{"rol", rolExec, addrmodeZp}
+	instrs[0x36] = &instr{"rol", rolExec, addrmodeZpX}
+	instrs[0x2e] = &instr{"rol", rolExec, addrmodeAbs}
+	instrs[0x3e] = &instr{"rol", rolExec, addrmodeAbsX}
+	// ROR ---------------------------------------------------------------------
+	instrs[0x6a] = &instr{"ror", rorExec, addrmodeAcc}
+	instrs[0x66] = &instr{"ror", rorExec, addrmodeZp}
+	instrs[0x76] = &instr{"ror", rorExec, addrmodeZpX}
+	instrs[0x6e] = &instr{"ror", rorExec, addrmodeAbs}
+	instrs[0x7e] = &instr{"ror", rorExec, addrmodeAbsX}
 	// AND ---------------------------------------------------------------------
 	instrs[0x29] = &instr{"and", andExec, addrmodeImm}
 	instrs[0x25] = &instr{"and", andExec, addrmodeZp}
@@ -1038,6 +1050,38 @@ func lsrExec(ctx *clientContext, op operand) error {
 	op.readModifyWrite(ctx, func(old uint8) uint8 {
 		res := old >> 1
 		oldBit0 := (old & 0x1) != 0
+		ctx.setNZ(res)
+		ctx.flagC = oldBit0
+		return res
+	})
+	return nil
+}
+
+// ROL -------------------------------------------------------------------------
+func rolExec(ctx *clientContext, op operand) error {
+	op.readModifyWrite(ctx, func(old uint8) uint8 {
+		bit0 := ctx.flagC
+		oldBit7 := (old & 0x80) != 0
+		res := old << 1
+		if bit0 {
+			res |= 0x01
+		}
+		ctx.setNZ(res)
+		ctx.flagC = oldBit7
+		return res
+	})
+	return nil
+}
+
+// ROR -------------------------------------------------------------------------
+func rorExec(ctx *clientContext, op operand) error {
+	op.readModifyWrite(ctx, func(old uint8) uint8 {
+		bit7 := ctx.flagC
+		oldBit0 := (old & 0x01) != 0
+		res := old >> 1
+		if bit7 {
+			res |= 0x80
+		}
 		ctx.setNZ(res)
 		ctx.flagC = oldBit0
 		return res

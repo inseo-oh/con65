@@ -1416,6 +1416,12 @@ func initInstrTable() {
 	instrs[0x2c] = &instr{"bit", bitExec, addrmodeAbs}
 	instrs[0x3c] = &instr{"bit", bitExec, addrmodeAbsX}
 	instrs[0x89] = &instr{"bit", bitExec, addrmodeImm}
+	// TRB---------------------------------------------------------------------
+	instrs[0x1c] = &instr{"trb", trbExec, addrmodeAbs}
+	instrs[0x14] = &instr{"trb", trbExec, addrmodeZp}
+	// TSB---------------------------------------------------------------------
+	instrs[0x0c] = &instr{"tsb", tsbExec, addrmodeAbs}
+	instrs[0x04] = &instr{"tsb", tsbExec, addrmodeZp}
 	// INC ---------------------------------------------------------------------
 	instrs[0x1a] = &instr{"inc", incExec, addrmodeAcc}
 	instrs[0xe6] = &instr{"inc", incExec, addrmodeZp}
@@ -1538,7 +1544,7 @@ func initInstrTable() {
 	// 2 bytes, 4 cycles
 	{
 		opcodes := [...]uint8{
-			0x54, 0xf4, 0xf4,
+			0x54, 0xd4, 0xf4,
 		}
 		for _, op := range opcodes {
 			instrs[op] = &instr{"nop", nopType2Exec, addrmodeZpX}
@@ -1945,6 +1951,24 @@ func bitExec(ctx *clientContext, op operand) error {
 	ctx.flagN = (rhs & 0x80) != 0
 	ctx.flagV = (rhs & 0x40) != 0
 	return nil
+}
+
+// TRB -------------------------------------------------------------------------
+func trbExec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		res := ctx.regA & old
+		ctx.flagZ = res == 0x00
+		return old & ^ctx.regA
+	})
+}
+
+// TSB -------------------------------------------------------------------------
+func tsbExec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		res := ctx.regA & old
+		ctx.flagZ = res == 0x00
+		return old | ctx.regA
+	})
 }
 
 // INC -------------------------------------------------------------------------

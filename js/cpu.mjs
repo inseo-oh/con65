@@ -161,6 +161,7 @@ export default class CPUClient {
                         }
                         this.onStop();
                         this.#client.write(new Uint8Array([netOpbyteAck]));
+                        break;
                     }
 
                     case netOpbyteEventWaitInterrupt: {
@@ -171,6 +172,7 @@ export default class CPUClient {
                         }
                         this.onWaitForInterrupt();
                         this.#client.write(new Uint8Array([netOpbyteAck]));
+                        break;
                     }
 
                     default: {

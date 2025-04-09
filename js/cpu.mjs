@@ -28,8 +28,8 @@ export default class CPUClient {
     onBusWrite = () => {
         throw new Error('not implemented');
     };
-    // RESET signal was asserted
-    onResetAsserted = () => {
+    // Called when STP was executed
+    onStop = () => {
         throw new Error('not implemented');
     };
     // Called if execution tracing is enabled
@@ -147,6 +147,16 @@ export default class CPUClient {
                         this.onTraceExec(pc, ir, disasm);
                         this.#client.write(new Uint8Array([netOpbyteAck]));
                         break;
+                    }
+
+                    case netOpbyteEventStop: {
+                        const res = this.#takeMsg('');
+                        if (res === undefined) {
+                            // Try again next time
+                            return;
+                        }
+                        this.onStop();
+                        this.#client.write(new Uint8Array([netOpbyteAck]));
                     }
 
                     default: {
@@ -385,3 +395,4 @@ const netOpbyteReadPc = 0x2b; // PC read
 const netOpbyteEventReadBus = 0x80; // Read from address
 const netOpbyteEventWriteBus = 0x81; // Write to address
 const netOpbyteEventTraceExec = 0x82; // Event for Trace Execution
+const netOpbyteEventStop = 0x83; // Event for Stop

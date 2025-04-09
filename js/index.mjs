@@ -82,6 +82,9 @@ cpu.onBusRead = (addr) => {
     execLogs.push(busLog);
     return val;
 };
+cpu.onStop = () => {
+    execLogs.push(` STOP |`);
+}
 
 let passCount = 0;
 let failCount = 0;
@@ -90,6 +93,10 @@ let failMismatchCount = 0;
 
 async function runTestFile(filename, fileText) {
     console.log(`# ${filename}`)
+    if (fileText.trim().length === 0) {
+        console.log(`=> File is empty`)
+        return;
+    }
     const tests = JSON.parse(fileText);
 
     for (const test of tests) {

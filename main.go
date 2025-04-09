@@ -1608,6 +1608,11 @@ func jmpExec(ctx *clientContext, op operand) error {
 	if absOp, ok := op.(absOperand); ok {
 		ctx.regPC = absOp.addr
 	} else if indOp, ok := op.(absIndOperand); ok {
+		// XXX: This page says on 65C02, it will spend extra cycle when page crossing occurs while reading from indirect address:
+		// https://www.masswerk.at/6502/6502_instruction_set.html
+		// "there's an extra cycle added to the exuction time when address bytes are on different memory pages."
+		//
+		// But the JSON tests I'm using doesn't seem to agree with this, because as you can see below, there's no conditional dummy read.
 		newPcL, err := ctx.readMemB(indOp.addr)
 		if err != nil {
 			return err

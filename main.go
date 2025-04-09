@@ -1207,7 +1207,7 @@ func (op zpIndYOperand) getAddr(ctx *clientContext, isWrite bool) (uint16, error
 	isPageCross := (newAddrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		newAddrL16 &= 0xff
-		ctx.readMemB(newAddrL16 | (uint16(realAddrH) << 8)) // Dummy read
+		ctx.readMemB(ctx.regPC - 1) // Dummy read
 		if isPageCross {
 			realAddrH++
 		}

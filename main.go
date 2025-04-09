@@ -233,9 +233,11 @@ const (
 
 	// 8x - Server events
 	// When client receives one of these, it should respond to it accordingly.
-	netOpbyteEventReadBus   = netOpbyte(0x80) // Read from address
-	netOpbyteEventWriteBus  = netOpbyte(0x81) // Write to address
-	netOpbyteEventTraceExec = netOpbyte(0x82) // Event for Trace Execution
+	netOpbyteEventReadBus       = netOpbyte(0x80) // Read from address
+	netOpbyteEventWriteBus      = netOpbyte(0x81) // Write to address
+	netOpbyteEventTraceExec     = netOpbyte(0x82) // Event for Trace Execution
+	netOpbyteEventStop          = netOpbyte(0x83) // Event for Stop
+	netOpbyteEventWaitInterrupt = netOpbyte(0x84) // Wait for interrupt
 )
 
 func (ctx *clientContext) main() {
@@ -494,6 +496,24 @@ func (ctx *clientContext) eventTraceExec(pc uint16, ir uint8, disasm string) err
 	// Receive response --------------------------------------------------------
 	return ctx.expectAckOrFail()
 }
+func (ctx *clientContext) eventStop() error {
+	// Send event --------------------------------------------------------------
+	event := newNetEvent(netOpbyteEventStop, 0)
+	if err := ctx.out(event); err != nil {
+		return err
+	}
+	// Receive response --------------------------------------------------------
+	return ctx.expectAckOrFail()
+}
+func (ctx *clientContext) eventWaitInterrupt() error {
+	// Send event --------------------------------------------------------------
+	event := newNetEvent(netOpbyteEventWaitInterrupt, 0)
+	if err := ctx.out(event); err != nil {
+		return err
+	}
+	// Receive response --------------------------------------------------------
+	return ctx.expectAckOrFail()
+}
 
 type sendBuf struct {
 	buf  []uint8
@@ -607,11 +627,10 @@ func (ctx *clientContext) runNextInstr() error {
 	instrPc := ctx.regPC
 	// Fetch the opcode --------------------------------------------------------
 	var instr *instr
-	instrOpcode := uint8(0)
 	if v, err := ctx.fetchInstrB(); err != nil {
 		return err
 	} else {
-		instrOpcode = v
+		ctx.ir = v
 		instr = instrs[v]
 		if instr == nil {
 			log.Panicf("opcode %#x is not implemented", v)
@@ -639,7 +658,7 @@ func (ctx *clientContext) runNextInstr() error {
 	case addrmodeAbs:
 		// Check if the opcode is JSR
 		addr := uint16(0)
-		if instrOpcode == 0x20 {
+		if ctx.ir == 0x20 {
 			// JSR pushes PC after reading first byte of the absolute address, before 2nd byte is read.
 			addrL, err := ctx.fetchInstrB()
 			if err != nil {
@@ -689,7 +708,7 @@ func (ctx *clientContext) runNextInstr() error {
 			return err
 		}
 		operand = absIndXOperand{addr}
-		operandDisasm = fmt.Sprintf("%#04x", addr)
+		operandDisasm = fmt.Sprintf("(%#04x,x)", addr)
 	case addrmodeRel:
 		addr, err := ctx.fetchInstrB()
 		if err != nil {
@@ -723,7 +742,7 @@ func (ctx *clientContext) runNextInstr() error {
 		if err != nil {
 			return err
 		}
-		operand = zpXIndOperand{addr}
+		operand = zpIndOperand{addr}
 		operandDisasm = fmt.Sprintf("(%#02x)", addr)
 	case addrmodeZpXInd:
 		addr, err := ctx.fetchInstrB()
@@ -739,6 +758,13 @@ func (ctx *clientContext) runNextInstr() error {
 		}
 		operand = zpIndYOperand{addr}
 		operandDisasm = fmt.Sprintf("(%#02x),y", addr)
+	case addrmodeNop1b1c:
+		operand = nopOperand{}
+		operandDisasm = ""
+	case addrmodeNop2b2c:
+		ctx.fetchInstrB() // Ignored
+		operand = nopOperand{}
+		operandDisasm = ""
 	default:
 		panic("bad addrmode value")
 	}
@@ -775,12 +801,23 @@ const (
 	addrmodeZp                       // Zeropage
 	addrmodeZpX                      // Zeropage, X indexed
 	addrmodeZpY                      // Zeropage, Y indexed
+	// NOPs
+	addrmodeNop1b1c // 1-byte, 1-cycle
+	addrmodeNop2b2c // 2-byte, 2-cycle
+
+)
+
+type rmwDummyCycleType uint8
+
+const (
+	rmwDummyCycleTypeRead = rmwDummyCycleType(iota)
+	rmwDummyCycleTypeWrite
 )
 
 type operand interface {
 	read(ctx *clientContext) (uint8, error)
 	write(ctx *clientContext, v uint8) error
-	readModifyWrite(ctx *clientContext, f func(uint8) uint8) error
+	readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error
 }
 
 // Relative --------------------------------------------------------------------
@@ -792,7 +829,7 @@ func (op relOperand) read(ctx *clientContext) (uint8, error) {
 func (op relOperand) write(ctx *clientContext, v uint8) error {
 	panic("attempted to read/write on an relative operand")
 }
-func (op relOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op relOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	panic("attempted to read/write on an relative operand")
 }
 
@@ -805,7 +842,7 @@ func (op impOperand) read(ctx *clientContext) (uint8, error) {
 func (op impOperand) write(ctx *clientContext, v uint8) error {
 	panic("attempted to read/write on an implied operand")
 }
-func (op impOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op impOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	panic("attempted to read/write on an implied operand")
 }
 
@@ -818,7 +855,7 @@ func (op immOperand) read(ctx *clientContext) (uint8, error) {
 func (op immOperand) write(ctx *clientContext, v uint8) error {
 	panic("attempted to write on an implied operand")
 }
-func (op immOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op immOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	panic("attempted to write on an implied operand")
 }
 
@@ -832,7 +869,7 @@ func (op accOperand) write(ctx *clientContext, v uint8) error {
 	ctx.regA = v
 	return nil
 }
-func (op accOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op accOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	ctx.regA = f(ctx.regA)
 	return nil
 }
@@ -846,13 +883,17 @@ func (op absOperand) read(ctx *clientContext) (uint8, error) {
 func (op absOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(op.addr, v)
 }
-func (op absOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op absOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := op.addr
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -861,15 +902,25 @@ func (op absOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) er
 type absXOperand struct{ addr uint16 }
 
 func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
+	isInc := ctx.ir == 0xfe
+	isDec := ctx.ir == 0xde
+	isStz := ctx.ir == 0x9e
 	addrH16 := ((op.addr & 0xff00) >> 8)
 	addrL16 := (op.addr & 0xff) + uint16(ctx.regX)
 	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		addrL16 &= 0xff
-		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+		// Certain instructions behaves a bit differently
+		if isPageCross || (isInc || isDec || isStz) {
+			ctx.readMemB(ctx.regPC - 1) // Dummy read
+		}
 		if isPageCross {
 			addrH16++
 		}
+		if !isStz {
+			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+		}
+	} else {
 	}
 	return addrL16 | (addrH16 << 8)
 }
@@ -879,13 +930,12 @@ func (op absXOperand) read(ctx *clientContext) (uint8, error) {
 func (op absXOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(op.getAddr(ctx, true), v)
 }
-func (op absXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op absXOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx, true)
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -899,10 +949,12 @@ func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		addrL16 &= 0xff
-		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		if isPageCross {
+			ctx.readMemB(ctx.regPC - 1) // Dummy read
 			addrH16++
 		}
+		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+	} else {
 	}
 	return addrL16 | (addrH16 << 8)
 }
@@ -912,13 +964,12 @@ func (op absYOperand) read(ctx *clientContext) (uint8, error) {
 func (op absYOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(op.getAddr(ctx, true), v)
 }
-func (op absYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op absYOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx, true)
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -933,11 +984,11 @@ func (op absIndOperand) read(ctx *clientContext) (uint8, error) {
 func (op absIndOperand) write(ctx *clientContext, v uint8) error {
 	panic("attempted to read/write on an absolute indirect operand")
 }
-func (op absIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op absIndOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	panic("attempted to read/write on an absolute indirect operand")
 }
 
-// Absolute indirect, X indexed ------------------------------------------------
+// Absolute X indexed indirect -------------------------------------------------
 type absIndXOperand struct{ addr uint16 }
 
 // Only JMP uses this mode, and JMP handles it directly.
@@ -947,7 +998,7 @@ func (op absIndXOperand) read(ctx *clientContext) (uint8, error) {
 func (op absIndXOperand) write(ctx *clientContext, v uint8) error {
 	panic("attempted to read/write on an absolute indirect operand")
 }
-func (op absIndXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op absIndXOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	panic("attempted to read/write on an absolute indirect operand")
 }
 
@@ -960,13 +1011,17 @@ func (op zpOperand) read(ctx *clientContext) (uint8, error) {
 func (op zpOperand) write(ctx *clientContext, v uint8) error {
 	return ctx.writeMemB(uint16(op.addr), v)
 }
-func (op zpOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := uint16(op.addr)
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -988,14 +1043,18 @@ func (op zpXOperand) write(ctx *clientContext, v uint8) error {
 	addr := op.getAddr(ctx)
 	return ctx.writeMemB(addr, v)
 }
-func (op zpXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpXOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx)
 
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -1017,14 +1076,18 @@ func (op zpYOperand) write(ctx *clientContext, v uint8) error {
 	addr := op.getAddr(ctx)
 	return ctx.writeMemB(addr, v)
 }
-func (op zpYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpYOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx)
 
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -1059,7 +1122,7 @@ func (op zpIndOperand) write(ctx *clientContext, v uint8) error {
 	}
 	return ctx.writeMemB(addr, v)
 }
-func (op zpIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpIndOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr, err := op.getAddr(ctx)
 	if err != nil {
 		return err
@@ -1068,7 +1131,11 @@ func (op zpIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) 
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -1105,7 +1172,7 @@ func (op zpXIndOperand) write(ctx *clientContext, v uint8) error {
 	}
 	return ctx.writeMemB(addr, v)
 }
-func (op zpXIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpXIndOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr, err := op.getAddr(ctx)
 	if err != nil {
 		return err
@@ -1114,7 +1181,11 @@ func (op zpXIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -1160,7 +1231,7 @@ func (op zpIndYOperand) write(ctx *clientContext, v uint8) error {
 	}
 	return ctx.writeMemB(addr, v)
 }
-func (op zpIndYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+func (op zpIndYOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
 	addr, err := op.getAddr(ctx, true)
 	if err != nil {
 		return err
@@ -1169,9 +1240,27 @@ func (op zpIndYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8)
 	if err != nil {
 		return err
 	}
-	ctx.writeMemB(addr, v)
+	if dummyCycleType == rmwDummyCycleTypeRead {
+		ctx.readMemB(addr) // Dummy read
+	} else {
+		ctx.writeMemB(addr, v) // Dummy write
+	}
 	v = f(v)
 	return ctx.writeMemB(addr, v)
+}
+
+// NOPs ------------------------------------------------------------------------
+
+type nopOperand struct{}
+
+func (op nopOperand) read(ctx *clientContext) (uint8, error) {
+	panic("attempted to read/write on NOP")
+}
+func (op nopOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to read/write on NOP")
+}
+func (op nopOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummyCycleType, f func(uint8) uint8) error {
+	panic("attempted to read/write on an NOP")
 }
 
 //==============================================================================
@@ -1212,6 +1301,7 @@ func initInstrTable() {
 	instrs[0x39] = &instr{"and", andExec, addrmodeAbsY}
 	instrs[0x21] = &instr{"and", andExec, addrmodeZpXInd}
 	instrs[0x31] = &instr{"and", andExec, addrmodeZpIndY}
+	instrs[0x32] = &instr{"and", andExec, addrmodeZpInd}
 	// EOR ---------------------------------------------------------------------
 	instrs[0x49] = &instr{"eor", eorExec, addrmodeImm}
 	instrs[0x45] = &instr{"eor", eorExec, addrmodeZp}
@@ -1221,6 +1311,7 @@ func initInstrTable() {
 	instrs[0x59] = &instr{"eor", eorExec, addrmodeAbsY}
 	instrs[0x41] = &instr{"eor", eorExec, addrmodeZpXInd}
 	instrs[0x51] = &instr{"eor", eorExec, addrmodeZpIndY}
+	instrs[0x52] = &instr{"eor", eorExec, addrmodeZpInd}
 	// ORA ---------------------------------------------------------------------
 	instrs[0x09] = &instr{"ora", oraExec, addrmodeImm}
 	instrs[0x05] = &instr{"ora", oraExec, addrmodeZp}
@@ -1230,6 +1321,7 @@ func initInstrTable() {
 	instrs[0x19] = &instr{"ora", oraExec, addrmodeAbsY}
 	instrs[0x01] = &instr{"ora", oraExec, addrmodeZpXInd}
 	instrs[0x11] = &instr{"ora", oraExec, addrmodeZpIndY}
+	instrs[0x12] = &instr{"ora", oraExec, addrmodeZpInd}
 	// LDA ---------------------------------------------------------------------
 	instrs[0xa9] = &instr{"lda", ldaExec, addrmodeImm}
 	instrs[0xa5] = &instr{"lda", ldaExec, addrmodeZp}
@@ -1239,6 +1331,7 @@ func initInstrTable() {
 	instrs[0xb9] = &instr{"lda", ldaExec, addrmodeAbsY}
 	instrs[0xa1] = &instr{"lda", ldaExec, addrmodeZpXInd}
 	instrs[0xb1] = &instr{"lda", ldaExec, addrmodeZpIndY}
+	instrs[0xb2] = &instr{"lda", ldaExec, addrmodeZpInd}
 	// LDX ---------------------------------------------------------------------
 	instrs[0xa2] = &instr{"ldx", ldxExec, addrmodeImm}
 	instrs[0xa6] = &instr{"ldx", ldxExec, addrmodeZp}
@@ -1259,6 +1352,7 @@ func initInstrTable() {
 	instrs[0x99] = &instr{"sta", staExec, addrmodeAbsY}
 	instrs[0x81] = &instr{"sta", staExec, addrmodeZpXInd}
 	instrs[0x91] = &instr{"sta", staExec, addrmodeZpIndY}
+	instrs[0x92] = &instr{"sta", staExec, addrmodeZpInd}
 	// STX ---------------------------------------------------------------------
 	instrs[0x86] = &instr{"stx", stxExec, addrmodeZp}
 	instrs[0x96] = &instr{"stx", stxExec, addrmodeZpY}
@@ -1267,9 +1361,15 @@ func initInstrTable() {
 	instrs[0x84] = &instr{"sty", styExec, addrmodeZp}
 	instrs[0x94] = &instr{"sty", styExec, addrmodeZpX}
 	instrs[0x8c] = &instr{"sty", styExec, addrmodeAbs}
+	// STZ ---------------------------------------------------------------------
+	instrs[0x64] = &instr{"stz", stzExec, addrmodeZp}
+	instrs[0x74] = &instr{"stz", stzExec, addrmodeZpX}
+	instrs[0x9c] = &instr{"stz", stzExec, addrmodeAbs}
+	instrs[0x9e] = &instr{"stz", stzExec, addrmodeAbsX}
 	// JMP ---------------------------------------------------------------------
 	instrs[0x4c] = &instr{"jmp", jmpExec, addrmodeAbs}
 	instrs[0x6c] = &instr{"jmp", jmpExec, addrmodeAbsInd}
+	instrs[0x7c] = &instr{"jmp", jmpExec, addrmodeAbsIndX}
 	// JSR ---------------------------------------------------------------------
 	instrs[0x20] = &instr{"jsr", jsrExec, addrmodeAbs}
 	// ADC ---------------------------------------------------------------------
@@ -1281,6 +1381,7 @@ func initInstrTable() {
 	instrs[0x79] = &instr{"adc", adcExec, addrmodeAbsY}
 	instrs[0x61] = &instr{"adc", adcExec, addrmodeZpXInd}
 	instrs[0x71] = &instr{"adc", adcExec, addrmodeZpIndY}
+	instrs[0x72] = &instr{"adc", adcExec, addrmodeZpInd}
 	// SBC ---------------------------------------------------------------------
 	instrs[0xe9] = &instr{"sbc", sbcExec, addrmodeImm}
 	instrs[0xe5] = &instr{"sbc", sbcExec, addrmodeZp}
@@ -1290,6 +1391,7 @@ func initInstrTable() {
 	instrs[0xf9] = &instr{"sbc", sbcExec, addrmodeAbsY}
 	instrs[0xe1] = &instr{"sbc", sbcExec, addrmodeZpXInd}
 	instrs[0xf1] = &instr{"sbc", sbcExec, addrmodeZpIndY}
+	instrs[0xf2] = &instr{"sbc", sbcExec, addrmodeZpInd}
 	// CMP ---------------------------------------------------------------------
 	instrs[0xc9] = &instr{"cmp", cmpExec, addrmodeImm}
 	instrs[0xc5] = &instr{"cmp", cmpExec, addrmodeZp}
@@ -1299,6 +1401,7 @@ func initInstrTable() {
 	instrs[0xd9] = &instr{"cmp", cmpExec, addrmodeAbsY}
 	instrs[0xc1] = &instr{"cmp", cmpExec, addrmodeZpXInd}
 	instrs[0xd1] = &instr{"cmp", cmpExec, addrmodeZpIndY}
+	instrs[0xd2] = &instr{"cmp", cmpExec, addrmodeZpInd}
 	// CPX ---------------------------------------------------------------------
 	instrs[0xe0] = &instr{"cpx", cpxExec, addrmodeImm}
 	instrs[0xe4] = &instr{"cpx", cpxExec, addrmodeZp}
@@ -1309,7 +1412,40 @@ func initInstrTable() {
 	instrs[0xcc] = &instr{"cpy", cpyExec, addrmodeAbs}
 	// BIT ---------------------------------------------------------------------
 	instrs[0x24] = &instr{"bit", bitExec, addrmodeZp}
+	instrs[0x34] = &instr{"bit", bitExec, addrmodeZpX}
 	instrs[0x2c] = &instr{"bit", bitExec, addrmodeAbs}
+	instrs[0x3c] = &instr{"bit", bitExec, addrmodeAbsX}
+	instrs[0x89] = &instr{"bit", bitExec, addrmodeImm}
+	// INC ---------------------------------------------------------------------
+	instrs[0x1a] = &instr{"inc", incExec, addrmodeAcc}
+	instrs[0xe6] = &instr{"inc", incExec, addrmodeZp}
+	instrs[0xf6] = &instr{"inc", incExec, addrmodeZpX}
+	instrs[0xee] = &instr{"inc", incExec, addrmodeAbs}
+	instrs[0xfe] = &instr{"inc", incExec, addrmodeAbsX}
+	// DEC ---------------------------------------------------------------------
+	instrs[0x3a] = &instr{"dec", decExec, addrmodeAcc}
+	instrs[0xc6] = &instr{"dec", decExec, addrmodeZp}
+	instrs[0xd6] = &instr{"dec", decExec, addrmodeZpX}
+	instrs[0xce] = &instr{"dec", decExec, addrmodeAbs}
+	instrs[0xde] = &instr{"dec", decExec, addrmodeAbsX}
+	// RMB ---------------------------------------------------------------------
+	instrs[0x07] = &instr{"rmb0", rmb0Exec, addrmodeZp}
+	instrs[0x17] = &instr{"rmb1", rmb1Exec, addrmodeZp}
+	instrs[0x27] = &instr{"rmb2", rmb2Exec, addrmodeZp}
+	instrs[0x37] = &instr{"rmb3", rmb3Exec, addrmodeZp}
+	instrs[0x47] = &instr{"rmb4", rmb4Exec, addrmodeZp}
+	instrs[0x57] = &instr{"rmb5", rmb5Exec, addrmodeZp}
+	instrs[0x67] = &instr{"rmb6", rmb6Exec, addrmodeZp}
+	instrs[0x77] = &instr{"rmb7", rmb7Exec, addrmodeZp}
+	// SMB ---------------------------------------------------------------------
+	instrs[0x87] = &instr{"smb0", smb0Exec, addrmodeZp}
+	instrs[0x97] = &instr{"smb1", smb1Exec, addrmodeZp}
+	instrs[0xa7] = &instr{"smb2", smb2Exec, addrmodeZp}
+	instrs[0xb7] = &instr{"smb3", smb3Exec, addrmodeZp}
+	instrs[0xc7] = &instr{"smb4", smb4Exec, addrmodeZp}
+	instrs[0xd7] = &instr{"smb5", smb5Exec, addrmodeZp}
+	instrs[0xe7] = &instr{"smb6", smb6Exec, addrmodeZp}
+	instrs[0xf7] = &instr{"smb7", smb7Exec, addrmodeZp}
 	// Branch instructions -----------------------------------------------------
 	instrs[0xb0] = &instr{"bcs", bcsExec, addrmodeRel}
 	instrs[0x90] = &instr{"bcc", bccExec, addrmodeRel}
@@ -1319,6 +1455,23 @@ func initInstrTable() {
 	instrs[0x30] = &instr{"bmi", bmiExec, addrmodeRel}
 	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
 	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
+	instrs[0x0f] = &instr{"bbr0", bbr0Exec, addrmodeRel}
+	instrs[0x1f] = &instr{"bbr1", bbr1Exec, addrmodeRel}
+	instrs[0x2f] = &instr{"bbr2", bbr2Exec, addrmodeRel}
+	instrs[0x3f] = &instr{"bbr3", bbr3Exec, addrmodeRel}
+	instrs[0x4f] = &instr{"bbr4", bbr4Exec, addrmodeRel}
+	instrs[0x5f] = &instr{"bbr5", bbr5Exec, addrmodeRel}
+	instrs[0x6f] = &instr{"bbr6", bbr6Exec, addrmodeRel}
+	instrs[0x7f] = &instr{"bbr7", bbr7Exec, addrmodeRel}
+	instrs[0x8f] = &instr{"bbs0", bbs0Exec, addrmodeRel}
+	instrs[0x9f] = &instr{"bbs1", bbs1Exec, addrmodeRel}
+	instrs[0xaf] = &instr{"bbs2", bbs2Exec, addrmodeRel}
+	instrs[0xbf] = &instr{"bbs3", bbs3Exec, addrmodeRel}
+	instrs[0xcf] = &instr{"bbs4", bbs4Exec, addrmodeRel}
+	instrs[0xdf] = &instr{"bbs5", bbs5Exec, addrmodeRel}
+	instrs[0xef] = &instr{"bbs6", bbs6Exec, addrmodeRel}
+	instrs[0xff] = &instr{"bbs7", bbs7Exec, addrmodeRel}
+	instrs[0x80] = &instr{"bra", braExec, addrmodeRel}
 	// Instructions with implied operands --------------------------------------
 	instrs[0x18] = &instr{"clc", clcExec, addrmodeImp}
 	instrs[0xd8] = &instr{"cld", cldExec, addrmodeImp}
@@ -1333,8 +1486,12 @@ func initInstrTable() {
 	instrs[0xc8] = &instr{"iny", inyExec, addrmodeImp}
 	instrs[0x48] = &instr{"pha", phaExec, addrmodeImp}
 	instrs[0x08] = &instr{"php", phpExec, addrmodeImp}
+	instrs[0xda] = &instr{"phx", phxExec, addrmodeImp}
+	instrs[0x5a] = &instr{"phy", phyExec, addrmodeImp}
 	instrs[0x68] = &instr{"pla", plaExec, addrmodeImp}
 	instrs[0x28] = &instr{"plp", plpExec, addrmodeImp}
+	instrs[0xfa] = &instr{"plx", plxExec, addrmodeImp}
+	instrs[0x7a] = &instr{"ply", plyExec, addrmodeImp}
 	instrs[0x40] = &instr{"rti", rtiExec, addrmodeImp}
 	instrs[0x60] = &instr{"rts", rtsExec, addrmodeImp}
 	instrs[0xaa] = &instr{"tax", taxExec, addrmodeImp}
@@ -1344,8 +1501,11 @@ func initInstrTable() {
 	instrs[0x9a] = &instr{"tax", txsExec, addrmodeImp}
 	instrs[0x98] = &instr{"tax", tyaExec, addrmodeImp}
 	instrs[0x00] = &instr{"brk", brkExec, addrmodeImp}
+	instrs[0xdb] = &instr{"stp", stpExec, addrmodeImp}
+	instrs[0xcb] = &instr{"wai", waiExec, addrmodeImp}
 	// NOPs --------------------------------------------------------------------
-	//1 byte, 1 cycle
+	instrs[0xea] = &instr{"nop", nopType1Exec, addrmodeImp}
+	// 1 byte, 1 cycle
 	{
 		ops := [...]uint8{
 			0x03, 0x13, 0x23, 0x33, 0x43, 0x53, 0x63, 0x73,
@@ -1354,54 +1514,43 @@ func initInstrTable() {
 			0x8b, 0x9b, 0xab, 0xbb, 0xeb, 0xfb,
 		}
 		for _, op := range ops {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+			instrs[op] = &instr{"nop", nopType1Exec, addrmodeNop1b1c}
 		}
 	}
-	// 2 bytes, 2 cycles (TODO)
+	// 2 bytes, 2 cycles
 	{
 		opcodes := [...]uint8{
 			0x02, 0x22, 0x42, 0x62, 0x82, 0xc2, 0xe2,
 		}
 		for _, op := range opcodes {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+			instrs[op] = &instr{"nop", nopType1Exec, addrmodeNop2b2c}
 		}
 	}
-	// 2 bytes, 3 cycles (TODO)
+	// 2 bytes, 3 cycles
 	{
 		opcodes := [...]uint8{
 			0x44,
 		}
 		for _, op := range opcodes {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+			instrs[op] = &instr{"nop", nopType2Exec, addrmodeZp}
 		}
 	}
-	// 2 bytes, 4 cycles (TODO)
+	// 2 bytes, 4 cycles
 	{
 		opcodes := [...]uint8{
 			0x54, 0xf4, 0xf4,
 		}
 		for _, op := range opcodes {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+			instrs[op] = &instr{"nop", nopType2Exec, addrmodeZpX}
 		}
 	}
-
-	// 3 bytes, 4 cycles (TODO)
+	// 3 bytes, 4 cycles
 	{
 		opcodes := [...]uint8{
-			0xdc, 0xfc,
+			0xdc, 0xfc, 0x5c,
 		}
 		for _, op := range opcodes {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
-		}
-	}
-
-	// 3 bytes, 8 cycles (TODO)
-	{
-		opcodes := [...]uint8{
-			0x5c,
-		}
-		for _, op := range opcodes {
-			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+			instrs[op] = &instr{"nop", nopType3Exec, addrmodeAbs}
 		}
 	}
 }
@@ -1466,33 +1615,101 @@ func bvcExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
+// FIXME: BBRx and BBSx instructions are implemented, but seems to be broken.
+func bbr0Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<0)) == 0)
+	return nil
+}
+func bbr1Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<1)) == 0)
+	return nil
+}
+func bbr2Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<2)) == 0)
+	return nil
+}
+func bbr3Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<3)) == 0)
+	return nil
+}
+func bbr4Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<4)) == 0)
+	return nil
+}
+func bbr5Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<5)) == 0)
+	return nil
+}
+func bbr6Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<6)) == 0)
+	return nil
+}
+func bbr7Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<7)) == 0)
+	return nil
+}
+func bbs0Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<0)) != 0)
+	return nil
+}
+func bbs1Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<1)) != 0)
+	return nil
+}
+func bbs2Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<2)) != 0)
+	return nil
+}
+func bbs3Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<3)) != 0)
+	return nil
+}
+func bbs4Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<4)) != 0)
+	return nil
+}
+func bbs5Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<5)) != 0)
+	return nil
+}
+func bbs6Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<6)) != 0)
+	return nil
+}
+func bbs7Exec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, (ctx.regA&(1<<7)) != 0)
+	return nil
+}
+func braExec(ctx *clientContext, op operand) error {
+	doBranch(ctx, op, true)
+	return nil
+}
+
 // ASL -------------------------------------------------------------------------
 func aslExec(ctx *clientContext, op operand) error {
-	op.readModifyWrite(ctx, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
 		res := old << 1
 		oldBit7 := (old & 0x80) != 0
 		ctx.setNZ(res)
 		ctx.flagC = oldBit7
 		return res
 	})
-	return nil
 }
 
 // LSR -------------------------------------------------------------------------
 func lsrExec(ctx *clientContext, op operand) error {
-	op.readModifyWrite(ctx, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
 		res := old >> 1
 		oldBit0 := (old & 0x1) != 0
 		ctx.setNZ(res)
 		ctx.flagC = oldBit0
 		return res
 	})
-	return nil
 }
 
 // ROL -------------------------------------------------------------------------
 func rolExec(ctx *clientContext, op operand) error {
-	op.readModifyWrite(ctx, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
 		bit0 := ctx.flagC
 		oldBit7 := (old & 0x80) != 0
 		res := old << 1
@@ -1503,12 +1720,11 @@ func rolExec(ctx *clientContext, op operand) error {
 		ctx.flagC = oldBit7
 		return res
 	})
-	return nil
 }
 
 // ROR -------------------------------------------------------------------------
 func rorExec(ctx *clientContext, op operand) error {
-	op.readModifyWrite(ctx, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
 		bit7 := ctx.flagC
 		oldBit0 := (old & 0x01) != 0
 		res := old >> 1
@@ -1519,7 +1735,6 @@ func rorExec(ctx *clientContext, op operand) error {
 		ctx.flagC = oldBit0
 		return res
 	})
-	return nil
 }
 
 // AND -------------------------------------------------------------------------
@@ -1603,6 +1818,11 @@ func styExec(ctx *clientContext, op operand) error {
 	return op.write(ctx, ctx.regY)
 }
 
+// STZ -------------------------------------------------------------------------
+func stzExec(ctx *clientContext, op operand) error {
+	return op.write(ctx, 0)
+}
+
 // JMP -------------------------------------------------------------------------
 func jmpExec(ctx *clientContext, op operand) error {
 	if absOp, ok := op.(absOperand); ok {
@@ -1619,6 +1839,19 @@ func jmpExec(ctx *clientContext, op operand) error {
 		}
 		ctx.readMemB((indOp.addr & 0xff00) | ((indOp.addr + 1) & 0xff)) // Dummy read
 		newPcH, err := ctx.readMemB(indOp.addr + 1)
+		if err != nil {
+			return err
+		}
+		ctx.regPC = uint16(newPcL) | (uint16(newPcH) << 8)
+	} else if indOp, ok := op.(absIndXOperand); ok {
+		indAddr := indOp.addr + uint16(ctx.regX)
+		ctx.readMemB(ctx.regPC - 2) // Dummy read
+
+		newPcL, err := ctx.readMemB(indAddr)
+		if err != nil {
+			return err
+		}
+		newPcH, err := ctx.readMemB(indAddr + 1)
 		if err != nil {
 			return err
 		}
@@ -1714,9 +1947,118 @@ func bitExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
+// INC -------------------------------------------------------------------------
+func incExec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		v := old + 1
+		ctx.setNZ(v)
+		return v
+	})
+}
+
+// DEC -------------------------------------------------------------------------
+func decExec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		v := old - 1
+		ctx.setNZ(v)
+		return v
+	})
+}
+
+// RMB -------------------------------------------------------------------------
+func rmb0Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<0)
+	})
+}
+func rmb1Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<1)
+	})
+}
+func rmb2Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<2)
+	})
+}
+func rmb3Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<3)
+	})
+}
+func rmb4Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<4)
+	})
+}
+func rmb5Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<5)
+	})
+}
+func rmb6Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<6)
+	})
+}
+func rmb7Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old & ^uint8(1<<7)
+	})
+}
+
+// SMB -------------------------------------------------------------------------
+func smb0Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<0)
+	})
+}
+func smb1Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<1)
+	})
+}
+func smb2Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<2)
+	})
+}
+func smb3Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<3)
+	})
+}
+func smb4Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<4)
+	})
+}
+func smb5Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<5)
+	})
+}
+func smb6Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<6)
+	})
+}
+func smb7Exec(ctx *clientContext, op operand) error {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
+		return old | uint8(1<<7)
+	})
+}
+
 // NOPs ------------------------------------------------------------------------
-// nopXbYc means X byte NOP with Y cycles
-func nop1b1cExec(ctx *clientContext, op operand) error {
+func nopType1Exec(ctx *clientContext, op operand) error {
+	return nil
+}
+func nopType2Exec(ctx *clientContext, op operand) error {
+	op.read(ctx) // Dummy read
+	return nil
+}
+func nopType3Exec(ctx *clientContext, op operand) error {
+	ctx.readMemB(ctx.regPC - 1) // Dummy read
 	return nil
 }
 
@@ -1775,6 +2117,12 @@ func phaExec(ctx *clientContext, op operand) error {
 func phpExec(ctx *clientContext, op operand) error {
 	return ctx.push(ctx.readP() | (1 << 4))
 }
+func phxExec(ctx *clientContext, op operand) error {
+	return ctx.push(ctx.regX)
+}
+func phyExec(ctx *clientContext, op operand) error {
+	return ctx.push(ctx.regY)
+}
 func plaExec(ctx *clientContext, op operand) error {
 	v, err := ctx.pull(true)
 	if err != nil {
@@ -1790,6 +2138,24 @@ func plpExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	ctx.writeP(v)
+	return nil
+}
+func plxExec(ctx *clientContext, op operand) error {
+	v, err := ctx.pull(true)
+	if err != nil {
+		return err
+	}
+	ctx.regX = v
+	ctx.setNZ(ctx.regX)
+	return nil
+}
+func plyExec(ctx *clientContext, op operand) error {
+	v, err := ctx.pull(true)
+	if err != nil {
+		return err
+	}
+	ctx.regY = v
+	ctx.setNZ(ctx.regY)
 	return nil
 }
 func rtiExec(ctx *clientContext, op operand) error {
@@ -1857,4 +2223,12 @@ func brkExec(ctx *clientContext, op operand) error {
 		ctx.regPC = v
 	}
 	return nil
+}
+func stpExec(ctx *clientContext, op operand) error {
+	// STUB
+	return ctx.eventStop()
+}
+func waiExec(ctx *clientContext, op operand) error {
+	// STUB
+	return ctx.eventWaitInterrupt()
 }

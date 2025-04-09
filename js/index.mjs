@@ -3,17 +3,37 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import CPUClient from './cpu.mjs';
 
-const SKIP_DECIMAL_TESTS = false;
+let skipDecimalTests = false;
+let skipFileOnFirstFail = false;
 const TEST_TIME_LIMIT = 1; // Seconds
 const servAddr = '127.0.0.1';
 let testPaths = [];
 
 for (let i = 2; i < process.argv.length; i++) {
-    testPaths.push(process.argv[i]);
+    const arg = process.argv[i];
+    if (arg === '--skip-decimal-tests') {
+        skipDecimalTests = true;
+    } else if (arg === '--skip-file-on-first-fail') {
+        skipFileOnFirstFail = true;
+    } else if (arg.startsWith('-')) {
+        console.error(
+            `Unrecognized argument ${arg} -- Run without arguments for help.`
+        );
+        process.exit(1);
+    } else {
+        testPaths.push(process.argv[i]);
+    }
 }
 if (testPaths.length === 0) {
     console.error(
-        `Usage: node js/index.mjs <list of test JSON files/directories>`
+        `Usage: node js/index.mjs <list of test JSON files/directories> <options>`
+    );
+    console.error(`OPTIONS:`);
+    console.error(
+        `--skip-decimal-tests      | Skips tests that set decimal flag`
+    );
+    console.error(
+        `--skip-file-on-first-fail | Skips entire file if any of the test fails in the file`
     );
     console.error(
         `For the test files, get it from https://github.com/SingleStepTests/65x02`
@@ -55,7 +75,7 @@ cpu.onBusWrite = (addr, val) => {
         busFail = true;
     }
     let busLog = `  BUS | W addr=${hex(addr)} val=${hex(val)}`;
-    if (busFail) {
+    if (badReason.length !== 0) {
         busLog += `(BAD: ${badReason})`;
     }
     execLogs.push(busLog);
@@ -76,7 +96,7 @@ cpu.onBusRead = (addr) => {
         busFail = true;
     }
     let busLog = `  BUS | R addr=${hex(addr)} val=${hex(val)}`;
-    if (busFail) {
+    if (badReason.length !== 0) {
         busLog += `(BAD: ${badReason})`;
     }
     execLogs.push(busLog);
@@ -84,10 +104,10 @@ cpu.onBusRead = (addr) => {
 };
 cpu.onStop = () => {
     execLogs.push(` STOP |`);
-}
+};
 cpu.onWaitForInterrupt = () => {
     execLogs.push(`  WAI |`);
-}
+};
 
 let passCount = 0;
 let failCount = 0;
@@ -95,15 +115,15 @@ let skipCount = 0;
 let failMismatchCount = 0;
 
 async function runTestFile(filename, fileText) {
-    console.log(`# ${filename}`)
+    console.log(`# ${filename}`);
     if (fileText.trim().length === 0) {
-        console.log(`=> File is empty`)
+        console.log(`=> File is empty`);
         return;
     }
     const tests = JSON.parse(fileText);
 
     for (const test of tests) {
-        if (SKIP_DECIMAL_TESTS) {
+        if (skipDecimalTests) {
             if (test.initial.p & (1 << 3)) {
                 skipCount++;
                 continue;
@@ -263,6 +283,9 @@ async function runTestFile(filename, fileText) {
                 console.log(`>>> ${line}`);
             }
             failCount++;
+            if (skipFileOnFirstFail) {
+                break;
+            }
         } else {
             passCount++;
         }

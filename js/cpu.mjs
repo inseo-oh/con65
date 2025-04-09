@@ -287,7 +287,7 @@ export default class CPUClient {
                     if (this.#inboxBuf.length < 2) {
                         return;
                     }
-                    const len = this.#inboxBuf[neededLen - 1];
+                    const len = this.#inboxBuf[neededLen];
                     neededLen += 1 + len;
                     break;
                 }

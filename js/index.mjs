@@ -85,6 +85,9 @@ cpu.onBusRead = (addr) => {
 cpu.onStop = () => {
     execLogs.push(` STOP |`);
 }
+cpu.onWaitForInterrupt = () => {
+    execLogs.push(`  WAI |`);
+}
 
 let passCount = 0;
 let failCount = 0;

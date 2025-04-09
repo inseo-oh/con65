@@ -32,6 +32,10 @@ export default class CPUClient {
     onStop = () => {
         throw new Error('not implemented');
     };
+    // Called when WAI was executed
+    onWaitForInterrupt = () => {
+        throw new Error('not implemented');
+    };
     // Called if execution tracing is enabled
     onTraceExec = (_pc, _ir, _disasm) => {
         throw new Error('not implemented');
@@ -156,6 +160,16 @@ export default class CPUClient {
                             return;
                         }
                         this.onStop();
+                        this.#client.write(new Uint8Array([netOpbyteAck]));
+                    }
+
+                    case netOpbyteEventWaitInterrupt: {
+                        const res = this.#takeMsg('');
+                        if (res === undefined) {
+                            // Try again next time
+                            return;
+                        }
+                        this.onWaitForInterrupt();
                         this.#client.write(new Uint8Array([netOpbyteAck]));
                     }
 
@@ -395,4 +409,5 @@ const netOpbyteReadPc = 0x2b; // PC read
 const netOpbyteEventReadBus = 0x80; // Read from address
 const netOpbyteEventWriteBus = 0x81; // Write to address
 const netOpbyteEventTraceExec = 0x82; // Event for Trace Execution
-const netOpbyteEventStop = 0x83; // Event for Stop
+const netOpbyteEventStop = 0x83; // Stop
+const netOpbyteEventWaitInterrupt = 0x84; // Wait for Interrupt

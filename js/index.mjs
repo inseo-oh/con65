@@ -89,6 +89,7 @@ let skipCount = 0;
 let failMismatchCount = 0;
 
 async function runTestFile(filename, fileText) {
+    console.log(`# ${filename}`)
     const tests = JSON.parse(fileText);
 
     for (const test of tests) {

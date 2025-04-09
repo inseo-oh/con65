@@ -1693,7 +1693,7 @@ func braExec(ctx *clientContext, op operand) error {
 
 // ASL -------------------------------------------------------------------------
 func aslExec(ctx *clientContext, op operand) error {
-	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
 		res := old << 1
 		oldBit7 := (old & 0x80) != 0
 		ctx.setNZ(res)
@@ -1704,7 +1704,7 @@ func aslExec(ctx *clientContext, op operand) error {
 
 // LSR -------------------------------------------------------------------------
 func lsrExec(ctx *clientContext, op operand) error {
-	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
 		res := old >> 1
 		oldBit0 := (old & 0x1) != 0
 		ctx.setNZ(res)
@@ -1715,7 +1715,7 @@ func lsrExec(ctx *clientContext, op operand) error {
 
 // ROL -------------------------------------------------------------------------
 func rolExec(ctx *clientContext, op operand) error {
-	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
 		bit0 := ctx.flagC
 		oldBit7 := (old & 0x80) != 0
 		res := old << 1
@@ -1730,7 +1730,7 @@ func rolExec(ctx *clientContext, op operand) error {
 
 // ROR -------------------------------------------------------------------------
 func rorExec(ctx *clientContext, op operand) error {
-	return op.readModifyWrite(ctx, rmwDummyCycleTypeWrite, func(old uint8) uint8 {
+	return op.readModifyWrite(ctx, rmwDummyCycleTypeRead, func(old uint8) uint8 {
 		bit7 := ctx.flagC
 		oldBit0 := (old & 0x01) != 0
 		res := old >> 1

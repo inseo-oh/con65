@@ -917,7 +917,8 @@ func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 		if isPageCross {
 			addrH16++
 		}
-		if !isStz {
+		// FIXME: Remove below if it's not needed
+		if false {
 			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		}
 	} else {
@@ -953,7 +954,10 @@ func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 			ctx.readMemB(ctx.regPC - 1) // Dummy read
 			addrH16++
 		}
-		ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+		// FIXME: Remove below if it's not needed
+		if false {
+			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+		}
 	} else {
 	}
 	return addrL16 | (addrH16 << 8)

@@ -682,6 +682,13 @@ func (ctx *clientContext) runNextInstr() error {
 			return err
 		}
 		operand = absIndOperand{addr}
+		operandDisasm = fmt.Sprintf("(%#04x)", addr)
+	case addrmodeAbsIndX:
+		addr, err := ctx.fetchInstrW()
+		if err != nil {
+			return err
+		}
+		operand = absIndXOperand{addr}
 		operandDisasm = fmt.Sprintf("%#04x", addr)
 	case addrmodeRel:
 		addr, err := ctx.fetchInstrB()
@@ -711,6 +718,13 @@ func (ctx *clientContext) runNextInstr() error {
 		}
 		operand = zpYOperand{addr}
 		operandDisasm = fmt.Sprintf("%#02x,y", addr)
+	case addrmodeZpInd:
+		addr, err := ctx.fetchInstrB()
+		if err != nil {
+			return err
+		}
+		operand = zpXIndOperand{addr}
+		operandDisasm = fmt.Sprintf("(%#02x)", addr)
 	case addrmodeZpXInd:
 		addr, err := ctx.fetchInstrB()
 		if err != nil {
@@ -746,19 +760,21 @@ func (ctx *clientContext) runNextInstr() error {
 type addrmode uint8
 
 const (
-	addrmodeAcc    = addrmode(iota) // Accumulator
-	addrmodeAbs                     // Absolute
-	addrmodeAbsX                    // Absolute, X indexed
-	addrmodeAbsY                    // Absolute, Y indexed
-	addrmodeImm                     // Immediate
-	addrmodeImp                     // Implied
-	addrmodeAbsInd                  // (Absolute) Indirect
-	addrmodeZpXInd                  // (Zeropage) X indexed indirect
-	addrmodeZpIndY                  // (Zeropage) indirect Y indexed
-	addrmodeRel                     // Relative
-	addrmodeZp                      // Zeropage
-	addrmodeZpX                     // Zeropage, X indexed
-	addrmodeZpY                     // Zeropage, Y indexed
+	addrmodeAcc     = addrmode(iota) // Accumulator
+	addrmodeAbs                      // Absolute
+	addrmodeAbsX                     // Absolute, X indexed
+	addrmodeAbsY                     // Absolute, Y indexed
+	addrmodeImm                      // Immediate
+	addrmodeImp                      // Implied
+	addrmodeAbsInd                   // (Absolute) Indirect
+	addrmodeAbsIndX                  // (Absolute) Indirect, X indexed
+	addrmodeZpInd                    // (Zeropage) Indirect
+	addrmodeZpXInd                   // (Zeropage) X indexed indirect
+	addrmodeZpIndY                   // (Zeropage) indirect Y indexed
+	addrmodeRel                      // Relative
+	addrmodeZp                       // Zeropage
+	addrmodeZpX                      // Zeropage, X indexed
+	addrmodeZpY                      // Zeropage, Y indexed
 )
 
 type operand interface {
@@ -921,6 +937,20 @@ func (op absIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8)
 	panic("attempted to read/write on an absolute indirect operand")
 }
 
+// Absolute indirect, X indexed ------------------------------------------------
+type absIndXOperand struct{ addr uint16 }
+
+// Only JMP uses this mode, and JMP handles it directly.
+func (op absIndXOperand) read(ctx *clientContext) (uint8, error) {
+	panic("attempted to read/write on an absolute indirect operand")
+}
+func (op absIndXOperand) write(ctx *clientContext, v uint8) error {
+	panic("attempted to read/write on an absolute indirect operand")
+}
+func (op absIndXOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	panic("attempted to read/write on an absolute indirect operand")
+}
+
 // Zeropage --------------------------------------------------------------------
 type zpOperand struct{ addr uint8 }
 
@@ -990,6 +1020,50 @@ func (op zpYOperand) write(ctx *clientContext, v uint8) error {
 func (op zpYOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
 	addr := op.getAddr(ctx)
 
+	v, err := ctx.readMemB(addr)
+	if err != nil {
+		return err
+	}
+	ctx.writeMemB(addr, v)
+	v = f(v)
+	return ctx.writeMemB(addr, v)
+}
+
+// Zeropage indirect -----------------------------------------------------------
+type zpIndOperand struct{ addr uint8 }
+
+func (op zpIndOperand) getAddr(ctx *clientContext) (uint16, error) {
+	indAddr8 := op.addr
+	realAddrL, err := ctx.readMemB(uint16(indAddr8))
+	if err != nil {
+		return 0, err
+	}
+	realAddrH, err := ctx.readMemB(uint16(indAddr8 + 1))
+	if err != nil {
+		return 0, err
+	}
+	realAddr := (uint16(realAddrH) << 8) | uint16(realAddrL)
+	return realAddr, nil
+}
+func (op zpIndOperand) read(ctx *clientContext) (uint8, error) {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return ctx.readMemB(addr)
+}
+func (op zpIndOperand) write(ctx *clientContext, v uint8) error {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return err
+	}
+	return ctx.writeMemB(addr, v)
+}
+func (op zpIndOperand) readModifyWrite(ctx *clientContext, f func(uint8) uint8) error {
+	addr, err := op.getAddr(ctx)
+	if err != nil {
+		return err
+	}
 	v, err := ctx.readMemB(addr)
 	if err != nil {
 		return err
@@ -1270,44 +1344,66 @@ func initInstrTable() {
 	instrs[0x9a] = &instr{"tax", txsExec, addrmodeImp}
 	instrs[0x98] = &instr{"tax", tyaExec, addrmodeImp}
 	instrs[0x00] = &instr{"brk", brkExec, addrmodeImp}
-	// NOP(s) ------------------------------------------------------------------
-	// Only the first one is official opcode. Rest of them are NMOS specific, undefined opcode
-	instrs[0xea] = &instr{"nop", nopExec, addrmodeImp}
-	instrs[0x1a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0x3a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0x5a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0x7a] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0xda] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0xfa] = &instr{"nop", nopExec, addrmodeImp}        // Undefined opcode
-	instrs[0x80] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
-	instrs[0x82] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
-	instrs[0x89] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
-	instrs[0xc2] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
-	instrs[0xe2] = &instr{"nop", nopExecWithOp, addrmodeImm}  // Undefined opcode
-	instrs[0x04] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
-	instrs[0x44] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
-	instrs[0x64] = &instr{"nop", nopExecWithOp, addrmodeZp}   // Undefined opcode
-	instrs[0x14] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0x34] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0x54] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0x74] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0xd4] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0xf4] = &instr{"nop", nopExecWithOp, addrmodeZpX}  // Undefined opcode
-	instrs[0x0c] = &instr{"nop", nopExecWithOp, addrmodeAbs}  // Undefined opcode
-	instrs[0x1c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	instrs[0x3c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	instrs[0x5c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	instrs[0x7c] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	instrs[0xdc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	instrs[0xfc] = &instr{"nop", nopExecWithOp, addrmodeAbsX} // Undefined opcode
-	// =========================================================================
-	// NMOS undefined opcodes
-	// =========================================================================
-	// ALR ---------------------------------------------------------------------
-	instrs[0x4b] = &instr{"nop", nmosAlrExec, addrmodeImm} // Undefined opcode
-	// ANC ---------------------------------------------------------------------
-	instrs[0x0b] = &instr{"nop", nmosAncExec, addrmodeImm} // Undefined opcode
-	instrs[0x2b] = &instr{"nop", nmosAncExec, addrmodeImm} // Undefined opcode
+	// NOPs --------------------------------------------------------------------
+	//1 byte, 1 cycle
+	{
+		ops := [...]uint8{
+			0x03, 0x13, 0x23, 0x33, 0x43, 0x53, 0x63, 0x73,
+			0x83, 0x93, 0xa3, 0xb3, 0xc3, 0xd3, 0xe3, 0xf3,
+			0x0b, 0x1b, 0x2b, 0x3b, 0x4b, 0x5b, 0x6b, 0x7b,
+			0x8b, 0x9b, 0xab, 0xbb, 0xeb, 0xfb,
+		}
+		for _, op := range ops {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
+	// 2 bytes, 2 cycles (TODO)
+	{
+		opcodes := [...]uint8{
+			0x02, 0x22, 0x42, 0x62, 0x82, 0xc2, 0xe2,
+		}
+		for _, op := range opcodes {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
+	// 2 bytes, 3 cycles (TODO)
+	{
+		opcodes := [...]uint8{
+			0x44,
+		}
+		for _, op := range opcodes {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
+	// 2 bytes, 4 cycles (TODO)
+	{
+		opcodes := [...]uint8{
+			0x54, 0xf4, 0xf4,
+		}
+		for _, op := range opcodes {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
+
+	// 3 bytes, 4 cycles (TODO)
+	{
+		opcodes := [...]uint8{
+			0xdc, 0xfc,
+		}
+		for _, op := range opcodes {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
+
+	// 3 bytes, 8 cycles (TODO)
+	{
+		opcodes := [...]uint8{
+			0x5c,
+		}
+		for _, op := range opcodes {
+			instrs[op] = &instr{"nop", nop1b1cExec, addrmodeImp}
+		}
+	}
 }
 
 func (ctx *clientContext) setNZ(v uint8) {
@@ -1516,9 +1612,8 @@ func jmpExec(ctx *clientContext, op operand) error {
 		if err != nil {
 			return err
 		}
-		newPcH, err := ctx.readMemB(
-			// We emulate 6502's indirect JMP bug (= we preserve upper 8-bit of the address after adding 1 to it)
-			((indOp.addr + 1) & 0xffff & ^uint16(0xff00)) | (indOp.addr & 0xff00))
+		ctx.readMemB((indOp.addr & 0xff00) | ((indOp.addr + 1) & 0xff)) // Dummy read
+		newPcH, err := ctx.readMemB(indOp.addr + 1)
 		if err != nil {
 			return err
 		}
@@ -1614,14 +1709,13 @@ func bitExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
+// NOPs ------------------------------------------------------------------------
+// nopXbYc means X byte NOP with Y cycles
+func nop1b1cExec(ctx *clientContext, op operand) error {
+	return nil
+}
+
 // Instructions with implied operands ------------------------------------------
-func nopExec(ctx *clientContext, op operand) error {
-	return nil
-}
-func nopExecWithOp(ctx *clientContext, op operand) error {
-	op.read(ctx) // Dummy read
-	return nil
-}
 func clcExec(ctx *clientContext, op operand) error {
 	ctx.flagC = false
 	return nil
@@ -1757,41 +1851,5 @@ func brkExec(ctx *clientContext, op operand) error {
 	} else {
 		ctx.regPC = v
 	}
-	return nil
-}
-
-// ==============================================================================
-// NMOS undefined opcodes
-// ==============================================================================
-
-// AND + LSR
-func nmosAlrExec(ctx *clientContext, op operand) error {
-	// AND ---------------------------------------------------------------------
-	rhs, err := op.read(ctx)
-	if err != nil {
-		return err
-	}
-	ctx.regA &= rhs
-	// LSR ---------------------------------------------------------------------
-	res := ctx.regA >> 1
-	oldBit0 := (ctx.regA & 0x1) != 0
-	ctx.regA = res
-	ctx.setNZ(res)
-	ctx.flagC = oldBit0
-	return nil
-}
-
-// AND + Set C like ASL
-func nmosAncExec(ctx *clientContext, op operand) error {
-	// AND ---------------------------------------------------------------------
-	rhs, err := op.read(ctx)
-	if err != nil {
-		return err
-	}
-	ctx.regA &= rhs
-	ctx.setNZ(ctx.regA)
-	// Set C flag --------------------------------------------------------------
-	oldBit7 := (ctx.regA & 0x80) != 0
-	ctx.flagC = oldBit7
 	return nil
 }

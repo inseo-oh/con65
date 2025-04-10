@@ -24,4 +24,5 @@ node js/index.mjs 65x02/wdc65c02/v1/20.json
 - Fix cycle times
 - BCD arithmetics (ADC and SBC with D=1)
 - BBR and BBS (Implemented but seems to be broken)
-- TRB and TSB
+
+- NOP 0x5B passes test, but [the test seems to have incorrect bus cycle count](https://github.com/SingleStepTests/65x02/issues/12)

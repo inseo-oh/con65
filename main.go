@@ -902,6 +902,13 @@ func (op absOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummy
 type absXOperand struct{ addr uint16 }
 
 func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
+	isAsl := ctx.ir == 0x1e
+	isRol := ctx.ir == 0xee
+	isLsr := ctx.ir == 0x5e
+	isRor := ctx.ir == 0x7e
+	isShift := isAsl || isRol || isLsr || isRor
+	isSta := ctx.ir == 0x9d
+
 	isInc := ctx.ir == 0xfe
 	isDec := ctx.ir == 0xde
 	isStz := ctx.ir == 0x9e
@@ -910,15 +917,13 @@ func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		addrL16 &= 0xff
-		// Certain instructions behaves a bit differently
 		if isPageCross || (isInc || isDec || isStz) {
 			ctx.readMemB(ctx.regPC - 1) // Dummy read
 		}
 		if isPageCross {
 			addrH16++
 		}
-		// FIXME: Remove below if it's not needed
-		if false {
+		if isShift || isSta {
 			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		}
 	} else {
@@ -945,6 +950,8 @@ func (op absXOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDumm
 type absYOperand struct{ addr uint16 }
 
 func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
+	isSta := ctx.ir == 0x99
+
 	addrH16 := ((op.addr & 0xff00) >> 8)
 	addrL16 := (op.addr & 0xff) + uint16(ctx.regY)
 	isPageCross := (addrL16 & 0xff00) != 0
@@ -954,8 +961,7 @@ func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 			ctx.readMemB(ctx.regPC - 1) // Dummy read
 			addrH16++
 		}
-		// FIXME: Remove below if it's not needed
-		if false {
+		if isSta {
 			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
 		}
 	} else {
@@ -1951,7 +1957,7 @@ func bitExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	res := ctx.regA & rhs
-	ctx.setNZ(res)
+	ctx.flagZ = res == 0
 	ctx.flagN = (rhs & 0x80) != 0
 	ctx.flagV = (rhs & 0x40) != 0
 	return nil

@@ -51,4 +51,4 @@ Takes approx. 9~10 minutes to complete on i3-10100 running under WSL, or 13 minu
 - BCD arithmetics (ADC and SBC with D=1)
 - BBR and BBS (Implemented but seems to be broken)
 
-- NOP 0x5B passes test, but [the test seems to have incorrect bus cycle count](https://github.com/SingleStepTests/65x02/issues/12)
+- NOP 0x5C passes test, but [the test seems to have incorrect bus cycle count](https://github.com/SingleStepTests/65x02/issues/12)

@@ -49,9 +49,7 @@ func serveWsClient(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	ctx.logger.Printf("Closing client connection")
-	conn.Close()
-	ctx.logger.Printf("Closed client connection")
+	ctx.logger.Printf("Bye!")
 }
 
 func (conn *wsClientConn) close() {

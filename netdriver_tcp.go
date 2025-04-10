@@ -33,6 +33,7 @@ func startTcpServer(serverAddr string) {
 }
 
 func serveTcpClient(conn net.Conn) {
+	defer conn.Close()
 	clientConn := tcpClientConn{
 		conn:   conn,
 		reader: bufio.NewReader(conn),
@@ -48,9 +49,7 @@ func serveTcpClient(conn net.Conn) {
 			break
 		}
 	}
-	ctx.logger.Printf("Closing client connection")
-	conn.Close()
-	ctx.logger.Printf("Closed client connection")
+	ctx.logger.Printf("Bye!")
 }
 
 func (conn *tcpClientConn) close() {

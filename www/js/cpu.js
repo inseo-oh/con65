@@ -1,20 +1,7 @@
 // Copyright (c) 2025, Oh Inseo (YJK) -- Licensed under BSD-2-Clause
-import net from 'node:net';
-
-const SERVER_PORT = 6502;
 
 export default class CPUClient {
-    #client = undefined;
     #inboxBuf = [];
-    #sentBytesSum = 0;
-    #recvBytesSum = 0;
-    #connStartTime = undefined;
-
-    static CCR_FLAG_C = 1 << 0;
-    static CCR_FLAG_V = 1 << 1;
-    static CCR_FLAG_Z = 1 << 2;
-    static CCR_FLAG_N = 1 << 3;
-    static CCR_FLAG_X = 1 << 4;
 
     // Takes address, and returns boolean indicating whether a valid device is there or not.
     onAddressAsserted = (_addr) => {
@@ -40,151 +27,122 @@ export default class CPUClient {
     onTraceExec = (_pc, _ir, _disasm) => {
         throw new Error('not implemented');
     };
-    // Called if exception tracing is enabled
-    // Parameters ir, errAddr, errFlags are not set if it's not a memory exception(i.e. Bus and Address error).
-    onTraceExc = (_exc, _pc, _ir, _errAddr, _errFlags) => {
-        throw new Error('not implemented');
-    };
 
     constructor() {}
 
     // Queue for functions waiting for response
     #responseWaitQueue = [];
 
-    connect(host, onConnected) {
-        this.#client = net.createConnection({ host, port: SERVER_PORT }, () => {
-            console.log('[CPUClient] Connected');
-            onConnected();
-            this.#connStartTime = new Date();
-        });
-        this.#client.on('end', () => {
-            const secs = (new Date() - this.#connStartTime) / 1000;
-            const sentStr = `${Math.floor(
-                this.#sentBytesSum / secs
-            )} bytes/sec`;
-            const recvStr = `${Math.floor(
-                this.#recvBytesSum / secs
-            )} bytes/sec`;
-            console.log(
-                `[CPUClient] Disconnected - Sent ${sentStr}, Recv ${recvStr}`
-            );
-        });
-        this.#client.on('data', (data) => {
-            this.#recvBytesSum += data.length;
-            for (let i = 0; i < data.length; i++) {
-                this.#inboxBuf.push(data.readUint8(i));
+    receivedBytes(data) {
+        for (let i = 0; i < data.length; i++) {
+            this.#inboxBuf.push(data[i]);
+        }
+        while (true) {
+            if (this.#inboxBuf.length === 0) {
+                break;
             }
-            while (true) {
-                if (this.#inboxBuf.length === 0) {
+            // Look at the first response byte to see what it means.
+            // - If it's a message we can't understand, remove it and move to next one.
+            // - If it's a message we can understand but need more data, exit the event handler.
+            //   Then check it again next time we receive some more data.
+            const tp = this.#inboxBuf[0];
+            switch (tp) {
+                case netOpbyteAck: {
+                    if (this.#responseWaitQueue.length === 0) {
+                        console.error('Got ACK but there are no requests...?');
+                        this.#takeMsg('');
+                        break;
+                    }
+                    const [callback, fmt] = this.#responseWaitQueue[0];
+                    const res = this.#takeMsg(fmt);
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
+                    }
+                    callback('ok', res);
+                    this.#responseWaitQueue.shift();
                     break;
                 }
-                // Look at the first response byte to see what it means.
-                // - If it's a message we can't understand, remove it and move to next one.
-                // - If it's a message we can understand but need more data, exit the event handler.
-                //   Then check it again next time we receive some more data.
-                const tp = this.#inboxBuf[0];
-                switch (tp) {
-                    case netOpbyteAck: {
-                        if (this.#responseWaitQueue.length === 0) {
-                            console.error(
-                                'Got ACK but there are no requests...?'
-                            );
-                            this.#takeMsg('');
-                            break;
-                        }
-                        const [callback, fmt] = this.#responseWaitQueue[0];
-                        const res = this.#takeMsg(fmt);
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        callback('ok', res);
-                        this.#responseWaitQueue.shift();
+
+                case netOpbyteFail: {
+                    if (this.#responseWaitQueue.length === 0) {
+                        console.error('Got FAIL but there are no requests...?');
+                        this.#takeMsg('');
                         break;
                     }
+                    const [callback, fmt] = this.#responseWaitQueue[0];
+                    callback('error');
+                    this.#responseWaitQueue.shift();
+                    break;
+                }
 
-                    case netOpbyteFail: {
-                        if (this.#responseWaitQueue.length === 0) {
-                            console.error(
-                                'Got FAIL but there are no requests...?'
-                            );
-                            this.#takeMsg('');
-                            break;
-                        }
-                        const [callback, fmt] = this.#responseWaitQueue[0];
-                        callback('error');
-                        this.#responseWaitQueue.shift();
-                        break;
+                case netOpbyteEventReadBus: {
+                    const res = this.#takeMsg('w');
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
                     }
+                    const [addr] = res;
+                    const val = this.onBusRead(addr);
+                    this.driver.write([netOpbyteAck, val]);
+                    break;
+                }
 
-                    case netOpbyteEventReadBus: {
-                        const res = this.#takeMsg('w');
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        const [addr] = res;
-                        const val = this.onBusRead(addr);
-                        this.#client.write(new Uint8Array([netOpbyteAck, val]));
-                        break;
+                case netOpbyteEventWriteBus: {
+                    const res = this.#takeMsg('wb');
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
                     }
+                    const [addr, val] = res;
+                    this.onBusWrite(addr, val);
+                    this.driver.write([netOpbyteAck]);
+                    break;
+                }
 
-                    case netOpbyteEventWriteBus: {
-                        const res = this.#takeMsg('wb');
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        const [addr, val] = res;
-                        this.onBusWrite(addr, val);
-                        this.#client.write(new Uint8Array([netOpbyteAck]));
-                        break;
+                case netOpbyteEventTraceExec: {
+                    const res = this.#takeMsg('wbs');
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
                     }
+                    const [pc, ir, disasm] = res;
+                    this.onTraceExec(pc, ir, disasm);
+                    this.driver.write([netOpbyteAck]);
+                    break;
+                }
 
-                    case netOpbyteEventTraceExec: {
-                        const res = this.#takeMsg('wbs');
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        const [pc, ir, disasm] = res;
-                        this.onTraceExec(pc, ir, disasm);
-                        this.#client.write(new Uint8Array([netOpbyteAck]));
-                        break;
+                case netOpbyteEventStop: {
+                    const res = this.#takeMsg('');
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
                     }
+                    this.onStop();
+                    this.driver.write([netOpbyteAck]);
+                    break;
+                }
 
-                    case netOpbyteEventStop: {
-                        const res = this.#takeMsg('');
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        this.onStop();
-                        this.#client.write(new Uint8Array([netOpbyteAck]));
-                        break;
+                case netOpbyteEventWaitInterrupt: {
+                    const res = this.#takeMsg('');
+                    if (res === undefined) {
+                        // Try again next time
+                        return;
                     }
+                    this.onWaitForInterrupt();
+                    this.driver.write([netOpbyteAck]);
+                    break;
+                }
 
-                    case netOpbyteEventWaitInterrupt: {
-                        const res = this.#takeMsg('');
-                        if (res === undefined) {
-                            // Try again next time
-                            return;
-                        }
-                        this.onWaitForInterrupt();
-                        this.#client.write(new Uint8Array([netOpbyteAck]));
-                        break;
-                    }
-
-                    default: {
-                        throw Error(`Unrecognized opbyte ${tp.toString(16)}`);
-                    }
+                default: {
+                    throw Error(`Unrecognized opbyte ${tp.toString(16)}`);
                 }
             }
-        });
+        }
     }
 
     bye() {
-        this.#client.end(new Uint8Array([netOpbyteBye]));
+        this.driver.end([netOpbyteBye]);
     }
 
     async setTraceExec(v) {
@@ -263,8 +221,7 @@ export default class CPUClient {
                 throw TypeError(`${e} is not a number`);
             }
         });
-        this.#client.write(new Uint8Array(cmd));
-        this.#sentBytesSum += cmd.length;
+        this.driver.write(cmd);
         return new Promise((resolve, reject) => {
             let o = [
                 (status, data) => {
@@ -375,6 +332,51 @@ export default class CPUClient {
         }
         return results;
     }
+}
+
+export function setWebsocketClient(url, cpu, onOpened) {
+    let connStartTime;
+    let sentBytesSum = 0;
+    let recvBytesSum = 0;
+
+    // Create WebSocket connection.
+    const socket = new WebSocket(url);
+
+    cpu.driver = {
+        write(data) {
+            socket.send(new Uint8Array(data));
+            sentBytesSum += data.length;
+        },
+        end(data) {
+            socket.send(new Uint8Array(data));
+            socket.close();
+        },
+    };
+
+    socket.binaryType = 'arraybuffer';
+
+    socket.addEventListener('open', (event) => {
+        console.log('Connected to sever');
+        connStartTime = new Date();
+        onOpened();
+    });
+
+    socket.addEventListener('message', (event) => {
+        let b = [];
+        const data = new Uint8Array(event.data);
+        for (let i = 0; i < data.length; i++) {
+            b.push(data[i]);
+        }
+        recvBytesSum += data.length;
+        cpu.receivedBytes(b);
+    });
+
+    socket.addEventListener('close', (event) => {
+        const secs = (new Date() - connStartTime) / 1000;
+        const sentStr = `${Math.floor(sentBytesSum / secs)} bytes/sec`;
+        const recvStr = `${Math.floor(recvBytesSum / secs)} bytes/sec`;
+        console.log(`Disconnected - Sent ${sentStr}, Recv ${recvStr}`);
+    });
 }
 
 function makeW(v) {

@@ -1,0 +1,19 @@
+{
+    "name": "json_tester",
+    "version": "1.0.0",
+    "description": "",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/inseo-oh/con65"
+    },
+    "license": "BSD-2-Clause",
+    "author": "Oh Inseo (YJK)",
+    "type": "module",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "dependencies": {
+        "arg": "^5.0.2"
+    }
+}

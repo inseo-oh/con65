@@ -2,36 +2,27 @@
 package main
 
 import (
-	"bufio"
 	"encoding/binary"
+	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net"
+	"os"
 )
+
+var mode = flag.String("mode", "tcp", "Server mode (tcp: Raw TCP server, ws: WebSocket)")
+var serverAddr = flag.String("addr", "localhost:6502", "Address of the server")
 
 func main() {
 	initInstrTable()
-
-	addr := "127.0.0.1:6502"
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("Failed to listen to connection -- %v", err)
-	}
-	log.Printf("Started server at %s", addr)
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept to connection -- %v", err)
-			continue
-		}
-		log.Printf("New client connection from %s", conn.RemoteAddr().String())
-		clientCtx := clientContext{
-			conn:   conn,
-			reader: bufio.NewReader(conn),
-		}
-		clientCtx.main()
-		conn.Close()
+	flag.Parse()
+	switch *mode {
+	case "tcp":
+		startTcpServer(*serverAddr)
+	case "ws":
+		startWsServer(*serverAddr)
+	default:
+		fmt.Printf("Unknown server mode '%s'\n", *mode)
+		os.Exit(1)
 	}
 }
 
@@ -40,9 +31,8 @@ func main() {
 //==============================================================================
 
 type clientContext struct {
-	conn   net.Conn
-	reader *bufio.Reader
-	closed bool
+	logger *log.Logger
+	conn   clientConn
 
 	ir uint8 // Instruction register
 
@@ -240,219 +230,213 @@ const (
 	netOpbyteEventWaitInterrupt = netOpbyte(0x84) // Wait for interrupt
 )
 
-func (ctx *clientContext) main() {
-	logger := log.New(log.Writer(), fmt.Sprintf("[client/%s] ", ctx.conn.RemoteAddr()), log.Flags())
-	for !ctx.closed {
-		err := ctx.serveNextCmd(logger)
-		if err != nil {
-			logger.Printf("Closing client connection due to an error: %v", err)
-			break
-		}
-	}
-	logger.Printf("Closing client connection")
-	ctx.conn.Close()
-	logger.Printf("Closed client connection")
+type clientConn interface {
+	inB() (uint8, error)
+	inW() (uint16, error)
+	out(b sendBuf) error
+	close()
 }
-func (ctx *clientContext) serveNextCmd(logger *log.Logger) error {
+
+func (ctx *clientContext) serveNextCmd() error {
 	const (
 		debugNetmsg = false
 	)
 
 	var hdrByte uint8
-	hdrByte, err := ctx.inB()
+	hdrByte, err := ctx.conn.inB()
 	if err != nil {
 		return err
 	}
 	switch netOpbyte(hdrByte) {
 	case netOpbyteBye:
 		if debugNetmsg {
-			logger.Printf("Bye")
+			ctx.logger.Printf("Bye")
 		}
-		ctx.closed = true
+		ctx.conn.close()
 
 	case netOpbyteTraceExecOn:
 		if debugNetmsg {
-			logger.Printf("TraceExecOn")
+			ctx.logger.Printf("TraceExecOn")
 		}
 		ctx.traceExec = true
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteTraceExecOff:
 		if debugNetmsg {
-			logger.Printf("TraceExecOff")
+			ctx.logger.Printf("TraceExecOff")
 		}
 		ctx.traceExec = false
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteTick:
 		if debugNetmsg {
-			logger.Printf("Tick")
+			ctx.logger.Printf("Tick")
 		}
 		err := ctx.runNextInstr()
 		if err != nil {
 			res := newNetFailResponse()
-			if err := ctx.out(res); err != nil {
+			if err := ctx.conn.out(res); err != nil {
 				return err
 			}
 		}
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWriteA:
-		val, err := ctx.inB()
+		val, err := ctx.conn.inB()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WriteA %#x", val)
+			ctx.logger.Printf("WriteA %#x", val)
 		}
 		ctx.regA = val
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadA:
 		if debugNetmsg {
-			logger.Printf("ReadA")
+			ctx.logger.Printf("ReadA")
 		}
 		res := newNetAckResponse(1)
 		res.appendB(ctx.regA)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWriteX:
-		val, err := ctx.inB()
+		val, err := ctx.conn.inB()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WriteX %#x", val)
+			ctx.logger.Printf("WriteX %#x", val)
 		}
 		ctx.regX = val
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadX:
 		if debugNetmsg {
-			logger.Printf("ReadX")
+			ctx.logger.Printf("ReadX")
 		}
 		res := newNetAckResponse(1)
 		res.appendB(ctx.regX)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWriteY:
-		val, err := ctx.inB()
+		val, err := ctx.conn.inB()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WriteY %#x", val)
+			ctx.logger.Printf("WriteY %#x", val)
 		}
 		ctx.regY = val
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadY:
 		if debugNetmsg {
-			logger.Printf("ReadY")
+			ctx.logger.Printf("ReadY")
 		}
 		res := newNetAckResponse(1)
 		res.appendB(ctx.regY)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWriteS:
-		val, err := ctx.inB()
+		val, err := ctx.conn.inB()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WriteS %#x", val)
+			ctx.logger.Printf("WriteS %#x", val)
 		}
 		ctx.regS = val
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadS:
 		if debugNetmsg {
-			logger.Printf("ReadS")
+			ctx.logger.Printf("ReadS")
 		}
 		res := newNetAckResponse(1)
 		res.appendB(ctx.regS)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWriteP:
-		val, err := ctx.inB()
+		val, err := ctx.conn.inB()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WriteP %#x", val)
+			ctx.logger.Printf("WriteP %#x", val)
 		}
 		ctx.writeP(val)
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadP:
 		if debugNetmsg {
-			logger.Printf("ReadP")
+			ctx.logger.Printf("ReadP")
 		}
 		res := newNetAckResponse(1)
 		res.appendB(ctx.readP())
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteWritePc:
-		val, err := ctx.inW()
+		val, err := ctx.conn.inW()
 		if err != nil {
 			return err
 		}
 		if debugNetmsg {
-			logger.Printf("WritePc %#x", val)
+			ctx.logger.Printf("WritePc %#x", val)
 		}
 		ctx.regPC = val
 		res := newNetAckResponse(0)
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	case netOpbyteReadPc:
 		if debugNetmsg {
-			logger.Printf("ReadPc")
+			ctx.logger.Printf("ReadPc")
 		}
 		res := newNetAckResponse(2)
 		res.appendW(ctx.regPC)
 
-		if err := ctx.out(res); err != nil {
+		if err := ctx.conn.out(res); err != nil {
 			return err
 		}
 
 	default:
-		logger.Printf("Unrecognized message type %x", hdrByte)
+		ctx.logger.Printf("Unrecognized message type %x", hdrByte)
 		if err := ctx.outFail(); err != nil {
 			return err
 		}
@@ -464,21 +448,21 @@ func (ctx *clientContext) eventReadBus(addr uint16) (uint8, error) {
 	// Send event --------------------------------------------------------------
 	event := newNetEvent(netOpbyteEventReadBus, 2)
 	event.appendW(addr)
-	if err := ctx.out(event); err != nil {
+	if err := ctx.conn.out(event); err != nil {
 		return 0, err
 	}
 	// Receive response --------------------------------------------------------
 	if err := ctx.expectAckOrFail(); err != nil {
 		return 0, err
 	}
-	return ctx.inB()
+	return ctx.conn.inB()
 }
 func (ctx *clientContext) eventWriteBus(addr uint16, v uint8) error {
 	// Send event --------------------------------------------------------------
 	event := newNetEvent(netOpbyteEventWriteBus, 3)
 	event.appendW(addr)
 	event.appendB(v)
-	if err := ctx.out(event); err != nil {
+	if err := ctx.conn.out(event); err != nil {
 		return err
 	}
 	// Receive response --------------------------------------------------------
@@ -490,7 +474,7 @@ func (ctx *clientContext) eventTraceExec(pc uint16, ir uint8, disasm string) err
 	event.appendW(pc)
 	event.appendB(ir)
 	event.appendS(disasm)
-	if err := ctx.out(event); err != nil {
+	if err := ctx.conn.out(event); err != nil {
 		return err
 	}
 	// Receive response --------------------------------------------------------
@@ -499,7 +483,7 @@ func (ctx *clientContext) eventTraceExec(pc uint16, ir uint8, disasm string) err
 func (ctx *clientContext) eventStop() error {
 	// Send event --------------------------------------------------------------
 	event := newNetEvent(netOpbyteEventStop, 0)
-	if err := ctx.out(event); err != nil {
+	if err := ctx.conn.out(event); err != nil {
 		return err
 	}
 	// Receive response --------------------------------------------------------
@@ -508,7 +492,7 @@ func (ctx *clientContext) eventStop() error {
 func (ctx *clientContext) eventWaitInterrupt() error {
 	// Send event --------------------------------------------------------------
 	event := newNetEvent(netOpbyteEventWaitInterrupt, 0)
-	if err := ctx.out(event); err != nil {
+	if err := ctx.conn.out(event); err != nil {
 		return err
 	}
 	// Receive response --------------------------------------------------------
@@ -555,32 +539,11 @@ func (b *sendBuf) appendS(s string) {
 	}
 }
 
-func (ctx *clientContext) out(b sendBuf) error {
-	// Make sure we were not wasting more space by accident
-	if len(b.dest) != 0 {
-		panic("too many bytes were allocated")
-	}
-	_, err := ctx.conn.Write(b.buf)
-	return err
-}
 func (ctx *clientContext) outFail() error {
-	return ctx.out(newNetFailResponse())
-}
-
-func (ctx *clientContext) inB() (uint8, error) {
-	return ctx.reader.ReadByte()
-}
-func (ctx *clientContext) inW() (uint16, error) {
-	bytes := [2]uint8{}
-	_, err := io.ReadFull(ctx.reader, bytes[:])
-	if err != nil {
-		return 0, err
-	}
-	res := (uint16(bytes[0]) << 8) | uint16(bytes[1])
-	return res, nil
+	return ctx.conn.out(newNetFailResponse())
 }
 func (ctx *clientContext) expectAckOrFail() error {
-	ackByte, err := ctx.inB()
+	ackByte, err := ctx.conn.inB()
 	if err != nil {
 		return err
 	}

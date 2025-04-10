@@ -1,60 +1,30 @@
 // Copyright (c) 2025, Oh Inseo (YJK) -- Licensed under BSD-2-Clause
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import CPUClient from './cpu.mjs';
+import net from 'node:net';
+import CPUClient, { setWebsocketClient } from '../js/cpu.js';
+import arg from 'arg';
 
-let skipDecimalTests = false;
-let skipFileOnFirstFail = false;
 const TEST_TIME_LIMIT = 1; // Seconds
-const servAddr = '127.0.0.1';
-let testPaths = [];
+const SERVER_ADDR = '127.0.0.1';
+const SERVER_PORT = 6502;
 
-for (let i = 2; i < process.argv.length; i++) {
-    const arg = process.argv[i];
-    if (arg === '--skip-decimal-tests') {
-        skipDecimalTests = true;
-    } else if (arg === '--skip-file-on-first-fail') {
-        skipFileOnFirstFail = true;
-    } else if (arg.startsWith('-')) {
-        console.error(
-            `Unrecognized argument ${arg} -- Run without arguments for help.`
-        );
-        process.exit(1);
-    } else {
-        testPaths.push(process.argv[i]);
-    }
-}
+const args = arg({
+    '--skip-decimal-tests': Boolean,
+    '--skip-file-on-first-fail': Boolean,
+    '--use-websocket': Boolean,
+});
+const skipDecimalTests = args['--skip-decimal-tests'];
+const skipFileOnFirstFail = args['--skip-file-on-first-fail'];
+const useWebsocket = args['--use-websocket'];
+const testPaths = args['_'];
 if (testPaths.length === 0) {
-    console.error(
-        `Usage: node js/index.mjs <list of test JSON files/directories> <options>`
-    );
-    console.error(`OPTIONS:`);
-    console.error(
-        `--skip-decimal-tests      | Skips tests that set decimal flag`
-    );
-    console.error(
-        `--skip-file-on-first-fail | Skips entire file if any of the test fails in the file`
-    );
-    console.error(
-        `For the test files, get it from https://github.com/SingleStepTests/65x02`
-    );
+    console.error(`No test paths specified`);
     process.exit(1);
 }
 
-const ram = new Uint8Array(16 * 1024 * 1024);
+const ram = new Uint8Array(64 * 1024);
 const cpu = new CPUClient();
-let execLogs = [];
-let expectedCycles = [];
-let busFail = false;
-
-function hex(x) {
-    return x.toString(16);
-}
-
-function cycleToBusLogFormat(cycAddr, cycVal, cycTyp) {
-    const typ = cycTyp === 'read' ? 'R' : 'W';
-    return `${typ} addr=${hex(cycAddr)} val=${hex(cycVal)}`;
-}
 
 cpu.onTraceExec = (pc, ir, disasm) => {
     execLogs.push(` EXEC | pc=${hex(pc)} ir=${hex(ir)} ${disasm}`);
@@ -108,6 +78,98 @@ cpu.onStop = () => {
 cpu.onWaitForInterrupt = () => {
     execLogs.push(`  WAI |`);
 };
+
+if (!useWebsocket) {
+    setTcpClient();
+} else {
+    setWebsocketClient(
+        `ws://${SERVER_ADDR}:${SERVER_PORT}/con65`,
+        cpu,
+        connectionOpened
+    );
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// TCP connection driver
+////////////////////////////////////////////////////////////////////////////////
+
+function setTcpClient() {
+    let connStartTime;
+    let sentBytesSum = 0;
+    let recvBytesSum = 0;
+
+    cpu.driver = {
+        write(data) {
+            socket.write(new Uint8Array(data));
+            sentBytesSum += data.length;
+        },
+        end(data) {
+            socket.end(new Uint8Array(data));
+        },
+    };
+
+    const socket = net.createConnection(
+        { servAddr: SERVER_ADDR, port: SERVER_PORT },
+        () => {
+            console.log('Connected to sever');
+            connStartTime = new Date();
+            connectionOpened();
+        }
+    );
+    socket.on('end', () => {
+        const secs = (new Date() - connStartTime) / 1000;
+        const sentStr = `${Math.floor(sentBytesSum / secs)} bytes/sec`;
+        const recvStr = `${Math.floor(recvBytesSum / secs)} bytes/sec`;
+        console.log(`Disconnected - Sent ${sentStr}, Recv ${recvStr}`);
+    });
+    socket.on('data', (data) => {
+        let b = [];
+        for (let i = 0; i < data.length; i++) {
+            b.push(data.readUint8(i));
+        }
+        recvBytesSum += data.length;
+        cpu.receivedBytes(b);
+    });
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Main test code
+////////////////////////////////////////////////////////////////////////////////
+
+let execLogs = [];
+let expectedCycles = [];
+let busFail = false;
+
+async function connectionOpened() {
+    await cpu.setTraceExec(true);
+
+    const beginTime = new Date();
+    for (const file of filepaths) {
+        if (!file.endsWith('.json')) {
+            continue;
+        }
+        const fileText = (await fs.readFile(file)).toString();
+        await runTestFile(file, fileText);
+    }
+    console.log(
+        `TEST FINISHED: ${passCount} passed, ${failCount} failed(${failMismatchCount} mismatches), ${skipCount} skipped`
+    );
+    cpu.bye();
+
+    const took = Math.floor((new Date() - beginTime) / 1000);
+    const mins = Math.floor(took / 60);
+    const secs = took % 60;
+    console.log(`Tests took ${mins} minutes ${secs} seconds`);
+}
+
+function hex(x) {
+    return x.toString(16);
+}
+
+function cycleToBusLogFormat(cycAddr, cycVal, cycTyp) {
+    const typ = cycTyp === 'read' ? 'R' : 'W';
+    return `${typ} addr=${hex(cycAddr)} val=${hex(cycVal)}`;
+}
 
 let passCount = 0;
 let failCount = 0;
@@ -301,25 +363,3 @@ for (const p of testPaths) {
         filepaths.push(p);
     }
 }
-
-cpu.connect(servAddr, async () => {
-    await cpu.setTraceExec(true);
-
-    const beginTime = new Date();
-    for (const file of filepaths) {
-        if (!file.endsWith('.json')) {
-            continue;
-        }
-        const fileText = (await fs.readFile(file)).toString();
-        await runTestFile(file, fileText);
-    }
-    console.log(
-        `TEST FINISHED: ${passCount} passed, ${failCount} failed(${failMismatchCount} mismatches), ${skipCount} skipped`
-    );
-    cpu.bye();
-
-    const took = Math.floor((new Date() - beginTime) / 1000);
-    const mins = Math.floor(took / 60);
-    const secs = took % 60;
-    console.log(`Tests took ${mins} minutes ${secs} seconds`);
-});

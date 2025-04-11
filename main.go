@@ -1853,7 +1853,7 @@ func jsrExec(ctx *clientContext, op operand) error {
 }
 
 // ADC, SBC, CMP ---------------------------------------------------------------
-func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+func adcBinaryImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
 	carryVal := uint8(0)
 	if carryIn {
 		carryVal = 1
@@ -1866,15 +1866,74 @@ func adcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow b
 			((lhs^res)&0x80 != 0) // and resulting sign is different
 	return
 }
-func sbcImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
-	return adcImpl(lhs, ^rhs, carryIn)
+func sbcBinaryImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+	return adcBinaryImpl(lhs, ^rhs, carryIn)
 }
+
+// Ref: http://www.6502.org/tutorials/decimal_mode.html#A
+func adcDecimalImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+	carryVal := uint8(0)
+	if carryIn {
+		carryVal = 1
+	}
+	// Add the first digit
+	temp := (lhs & 0xf) + (rhs & 0xf) + carryVal
+	if 10 <= temp {
+		// Adding 6 to it converts binary result to a valid BCD value
+		temp = ((temp + 6) & 0xf) + 0x10
+	}
+	// Add the second digit
+	lhsUpper := lhs & 0xf0
+	rhsUpper := rhs & 0xf0
+	result16 := uint16(lhsUpper) + uint16(rhsUpper) + uint16(temp)
+	res = uint8(result16)
+	overflow =
+		((lhs^rhs)&0x80 == 0) && // It's overflow if LHS and RHS signs are the same
+			((lhs^res)&0x80 != 0) // and resulting sign is different
+	// Fix the second digit
+	if 0xa0 <= result16 {
+		result16 += 0x60
+		carryOut = true
+		res = uint8(result16)
+	}
+	return
+}
+
+// Ref: http://www.6502.org/tutorials/decimal_mode.html#A
+func sbcDecimalImpl(lhs, rhs uint8, carryIn bool) (res uint8, carryOut bool, overflow bool) {
+	carryVal := uint8(1)
+	if carryIn {
+		carryVal = 0
+	}
+	// Subtract the first digit
+	temp := (lhs & 0xf) - (rhs & 0xf) - carryVal
+	// Subtract value
+	result16 := uint16(lhs) - uint16(rhs) - uint16(carryVal)
+	// We first get the overflow and carry flag result
+	// Note that both flags are calculated differently here, because binary subtraction actually uses
+	// binary addition to do its job. (Look at how SBC is implemented if you don't believe me :D)
+	// And obviously code from ADC won't work if we actually used subtraction, like we did here.
+	overflow =
+		((lhs^rhs)&0x80 != 0) && // It's overflow if LHS and RHS signs are different
+			((lhs^uint8(result16))&0x80 != 0) // and resulting sign is different from LHS one
+	carryOut = !(int16(result16) < 0)
+	// We fix the value
+	if int16(result16) < 0 {
+		result16 -= 0x60
+	}
+	if int8(temp) < 0 {
+		result16 -= 0x06
+	}
+	res = uint8(result16)
+	return
+}
+
 func (ctx *clientContext) cmpImpl(op operand, lhs uint8) error {
 	rhs, err := op.read(ctx)
 	if err != nil {
 		return err
 	}
-	res, carry, _ := sbcImpl(lhs, rhs, true)
+	res, carry, _ := sbcBinaryImpl(lhs, rhs, true)
 	ctx.setNZ(res)
 	ctx.flagC = carry
 	return nil
@@ -1884,11 +1943,21 @@ func adcExec(ctx *clientContext, op operand) error {
 	if err != nil {
 		return err
 	}
-	res, carry, overflow := adcImpl(ctx.regA, rhs, ctx.flagC)
-	ctx.regA = res
-	ctx.flagC = carry
-	ctx.flagV = overflow
-	ctx.setNZ(res)
+	if ctx.flagD {
+		ctx.readBus(0x7f) // Dummy read
+		res, carry, overflow := adcDecimalImpl(ctx.regA, rhs, ctx.flagC)
+		ctx.regA = res
+		ctx.flagC = carry
+		ctx.flagV = overflow
+		ctx.setNZ(res)
+	} else {
+		res, carry, overflow := adcBinaryImpl(ctx.regA, rhs, ctx.flagC)
+		ctx.regA = res
+		ctx.flagC = carry
+		ctx.flagV = overflow
+		ctx.setNZ(res)
+	}
+
 	return nil
 }
 func sbcExec(ctx *clientContext, op operand) error {
@@ -1896,11 +1965,20 @@ func sbcExec(ctx *clientContext, op operand) error {
 	if err != nil {
 		return err
 	}
-	res, carry, overflow := sbcImpl(ctx.regA, rhs, ctx.flagC)
-	ctx.regA = res
-	ctx.flagC = carry
-	ctx.flagV = overflow
-	ctx.setNZ(res)
+	if ctx.flagD {
+		ctx.readBus(0) // Dummy read
+		res, carry, overflow := sbcDecimalImpl(ctx.regA, rhs, ctx.flagC)
+		ctx.regA = res
+		ctx.flagC = carry
+		ctx.flagV = overflow
+		ctx.setNZ(res)
+	} else {
+		res, carry, overflow := sbcBinaryImpl(ctx.regA, rhs, ctx.flagC)
+		ctx.regA = res
+		ctx.flagC = carry
+		ctx.flagV = overflow
+		ctx.setNZ(res)
+	}
 	return nil
 }
 func cmpExec(ctx *clientContext, op operand) error {

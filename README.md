@@ -45,16 +45,14 @@ node www/json_tester/index.js 65x02/wdc65c02/v1/20.json
 You can also run all JSONs in a directory. Following will run ALL 65c02 tests:
 
 ```shell
-node www/json_tester/index.js --skip-file-on-first-fail 65x02/wdc65c02/v1/
+node www/json_tester/index.js 65x02/wdc65c02/v1/
 ```
 
 #### NOTES:
 
 - Test client connects via raw TCP by default. To use Websocket, use `--use-websocket` flag.
-- Takes approx. 16 minutes to complete on i3-10100 running under WSL, or 21 minutes when using Websocket.
-- It's normal that some of them fail(see [TODOs](#todos) below). But some of them output very long execution log because they failed due to execution timeout, hence the `--skip-file-on-first-fail` flag. I haven't tested how bad it is, but it might even generate over 1GB of log file.
+- Takes approx. 21 minutes to complete on Ryzen 5800X, or 33 minutes when using Websocket.
 
 ## TODOs
 
-- BBR and BBS (Implemented but seems to be broken)
 - NOP 0x5C passes test, but [the test seems to have incorrect bus cycle count](https://github.com/SingleStepTests/65x02/issues/12). This might be true for some other instructions as well.

@@ -79,14 +79,14 @@ cpu.onWaitForInterrupt = () => {
     execLogs.push(`  WAI |`);
 };
 
-if (!useWebsocket) {
-    setTcpClient();
-} else {
-    setWebsocketClient(
-        `ws://${SERVER_ADDR}:${SERVER_PORT}/con65`,
-        cpu,
-        connectionOpened
-    );
+let filepaths = [];
+
+for (const p of testPaths) {
+    if ((await fs.stat(p)).isDirectory()) {
+        filepaths = (await fs.readdir(p)).map((x) => path.join(p, x));
+    } else {
+        filepaths.push(p);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -109,7 +109,7 @@ function setTcpClient() {
     };
 
     const socket = net.createConnection(
-        { servAddr: SERVER_ADDR, port: SERVER_PORT },
+        { host: SERVER_ADDR, port: SERVER_PORT },
         () => {
             console.log('Connected to sever');
             connStartTime = new Date();
@@ -140,6 +140,12 @@ let execLogs = [];
 let expectedCycles = [];
 let busFail = false;
 
+let passCount = 0;
+let failCount = 0;
+let skipCount = 0;
+let failMismatchCount = 0;
+let instrCount = 0;
+
 async function connectionOpened() {
     await cpu.setTraceExec(true);
 
@@ -157,6 +163,11 @@ async function connectionOpened() {
     cpu.bye();
 
     const took = Math.floor((new Date() - beginTime) / 1000);
+    console.log(
+        `${instrCount} instructions in ${took} seconds (${
+            instrCount / took
+        } instructions per second)`
+    );
     const mins = Math.floor(took / 60);
     const secs = took % 60;
     console.log(`Tests took ${mins} minutes ${secs} seconds`);
@@ -170,11 +181,6 @@ function cycleToBusLogFormat(cycAddr, cycVal, cycTyp) {
     const typ = cycTyp === 'read' ? 'R' : 'W';
     return `${typ} addr=${hex(cycAddr)} val=${hex(cycVal)}`;
 }
-
-let passCount = 0;
-let failCount = 0;
-let skipCount = 0;
-let failMismatchCount = 0;
 
 async function runTestFile(filename, fileText) {
     console.log(`# ${filename}`);
@@ -247,6 +253,7 @@ async function runTestFile(filename, fileText) {
             }
             try {
                 await cpu.tick();
+                instrCount++;
             } catch (e) {
                 console.log('>>> CPU Error');
                 console.log(e);
@@ -354,12 +361,14 @@ async function runTestFile(filename, fileText) {
     }
 }
 
-let filepaths = [];
 
-for (const p of testPaths) {
-    if ((await fs.stat(p)).isDirectory()) {
-        filepaths = (await fs.readdir(p)).map((x) => path.join(p, x));
-    } else {
-        filepaths.push(p);
-    }
+if (!useWebsocket) {
+    setTcpClient();
+} else {
+    setWebsocketClient(
+        `ws://${SERVER_ADDR}:${SERVER_PORT}/con65`,
+        cpu,
+        connectionOpened
+    );
 }
+

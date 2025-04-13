@@ -34,7 +34,8 @@ type clientContext struct {
 	logger *log.Logger
 	conn   clientConn
 
-	ir uint8 // Instruction register
+	ir             uint8 // Instruction register
+	lastAccessAddr uint16
 
 	// Registers ---------------------------------------------------------------
 	regA  uint8  // Accumulator
@@ -151,9 +152,11 @@ func (ctx *clientContext) pullPc(isFirstPull bool) error {
 //==============================================================================
 
 func (ctx *clientContext) readBus(addr uint16) (uint8, error) {
+	ctx.lastAccessAddr = addr
 	return ctx.eventReadBus(addr)
 }
 func (ctx *clientContext) writeBus(addr uint16, v uint8) error {
+	ctx.lastAccessAddr = addr
 	return ctx.eventWriteBus(addr, v)
 }
 func (ctx *clientContext) readMemW(addr uint16) (uint16, error) {
@@ -865,31 +868,30 @@ func (op absOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDummy
 type absXOperand struct{ addr uint16 }
 
 func (op absXOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
-	isAsl := ctx.ir == 0x1e
-	isRol := ctx.ir == 0xee
-	isLsr := ctx.ir == 0x5e
-	isRor := ctx.ir == 0x7e
-	isShift := isAsl || isRol || isLsr || isRor
-	isSta := ctx.ir == 0x9d
-
-	isInc := ctx.ir == 0xfe
-	isDec := ctx.ir == 0xde
-	isStz := ctx.ir == 0x9e
+	isSta := (ctx.ir == 0x9d)
+	isStz := (ctx.ir == 0x9e)
+	isShift :=
+		(ctx.ir == 0x1e) || // ASL
+			(ctx.ir == 0x3e) || // ROL
+			(ctx.ir == 0x5e) || // LSR
+			(ctx.ir == 0x7e) // ROR
 	addrH16 := ((op.addr & 0xff00) >> 8)
 	addrL16 := (op.addr & 0xff) + uint16(ctx.regX)
 	isPageCross := (addrL16 & 0xff00) != 0
 	if isPageCross || isWrite {
 		addrL16 &= 0xff
-		if isPageCross || (isInc || isDec || isStz) {
-			ctx.readMemB(ctx.regPC - 1) // Dummy read
-		}
 		if isPageCross {
 			addrH16++
 		}
-		if isShift || isSta {
-			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
+		if isShift {
+			if isPageCross {
+				ctx.readMemB(ctx.lastAccessAddr) // Dummy read
+			}
+		} else if isSta || isStz {
+			ctx.readMemB(ctx.lastAccessAddr) // Dummy read
+		} else {
+			ctx.readMemB(ctx.regPC - 1) // Dummy read
 		}
-	} else {
 	}
 	return addrL16 | (addrH16 << 8)
 }
@@ -905,6 +907,7 @@ func (op absXOperand) readModifyWrite(ctx *clientContext, dummyCycleType rmwDumm
 	if err != nil {
 		return err
 	}
+	ctx.readMemB(addr) // Dummy read
 	v = f(v)
 	return ctx.writeMemB(addr, v)
 }
@@ -923,11 +926,9 @@ func (op absYOperand) getAddr(ctx *clientContext, isWrite bool) uint16 {
 		if isPageCross {
 			ctx.readMemB(ctx.regPC - 1) // Dummy read
 			addrH16++
+		} else if isSta {
+			ctx.readMemB(ctx.lastAccessAddr) // Dummy read
 		}
-		if isSta {
-			ctx.readMemB(addrL16 | (addrH16 << 8)) // Dummy read
-		}
-	} else {
 	}
 	return addrL16 | (addrH16 << 8)
 }
@@ -1434,23 +1435,24 @@ func initInstrTable() {
 	instrs[0x30] = &instr{"bmi", bmiExec, addrmodeRel}
 	instrs[0x70] = &instr{"bvs", bvsExec, addrmodeRel}
 	instrs[0x50] = &instr{"bvc", bvcExec, addrmodeRel}
-	instrs[0x0f] = &instr{"bbr0", bbr0Exec, addrmodeRel}
-	instrs[0x1f] = &instr{"bbr1", bbr1Exec, addrmodeRel}
-	instrs[0x2f] = &instr{"bbr2", bbr2Exec, addrmodeRel}
-	instrs[0x3f] = &instr{"bbr3", bbr3Exec, addrmodeRel}
-	instrs[0x4f] = &instr{"bbr4", bbr4Exec, addrmodeRel}
-	instrs[0x5f] = &instr{"bbr5", bbr5Exec, addrmodeRel}
-	instrs[0x6f] = &instr{"bbr6", bbr6Exec, addrmodeRel}
-	instrs[0x7f] = &instr{"bbr7", bbr7Exec, addrmodeRel}
-	instrs[0x8f] = &instr{"bbs0", bbs0Exec, addrmodeRel}
-	instrs[0x9f] = &instr{"bbs1", bbs1Exec, addrmodeRel}
-	instrs[0xaf] = &instr{"bbs2", bbs2Exec, addrmodeRel}
-	instrs[0xbf] = &instr{"bbs3", bbs3Exec, addrmodeRel}
-	instrs[0xcf] = &instr{"bbs4", bbs4Exec, addrmodeRel}
-	instrs[0xdf] = &instr{"bbs5", bbs5Exec, addrmodeRel}
-	instrs[0xef] = &instr{"bbs6", bbs6Exec, addrmodeRel}
-	instrs[0xff] = &instr{"bbs7", bbs7Exec, addrmodeRel}
 	instrs[0x80] = &instr{"bra", braExec, addrmodeRel}
+	// BBRx/BBRx are weird monsters
+	instrs[0x0f] = &instr{"bbr0", bbr0Exec, addrmodeZp}
+	instrs[0x1f] = &instr{"bbr1", bbr1Exec, addrmodeZp}
+	instrs[0x2f] = &instr{"bbr2", bbr2Exec, addrmodeZp}
+	instrs[0x3f] = &instr{"bbr3", bbr3Exec, addrmodeZp}
+	instrs[0x4f] = &instr{"bbr4", bbr4Exec, addrmodeZp}
+	instrs[0x5f] = &instr{"bbr5", bbr5Exec, addrmodeZp}
+	instrs[0x6f] = &instr{"bbr6", bbr6Exec, addrmodeZp}
+	instrs[0x7f] = &instr{"bbr7", bbr7Exec, addrmodeZp}
+	instrs[0x8f] = &instr{"bbs0", bbs0Exec, addrmodeZp}
+	instrs[0x9f] = &instr{"bbs1", bbs1Exec, addrmodeZp}
+	instrs[0xaf] = &instr{"bbs2", bbs2Exec, addrmodeZp}
+	instrs[0xbf] = &instr{"bbs3", bbs3Exec, addrmodeZp}
+	instrs[0xcf] = &instr{"bbs4", bbs4Exec, addrmodeZp}
+	instrs[0xdf] = &instr{"bbs5", bbs5Exec, addrmodeZp}
+	instrs[0xef] = &instr{"bbs6", bbs6Exec, addrmodeZp}
+	instrs[0xff] = &instr{"bbs7", bbs7Exec, addrmodeZp}
 	// Instructions with implied operands --------------------------------------
 	instrs[0x18] = &instr{"clc", clcExec, addrmodeImp}
 	instrs[0xd8] = &instr{"cld", cldExec, addrmodeImp}
@@ -1545,6 +1547,7 @@ func signExtBtoW(v uint8) uint16 {
 }
 
 func doBranch(ctx *clientContext, op operand, cond bool) {
+	isBbrOrBbs := (ctx.ir & 0x0f) == 0x0f
 	rel, ok := op.(relOperand)
 	if !ok {
 		panic("expected an relative operand")
@@ -1552,13 +1555,18 @@ func doBranch(ctx *clientContext, op operand, cond bool) {
 	if !cond {
 		return
 	}
-	ctx.readMemB(ctx.regPC) // Dummy read
+	oldPc := ctx.regPC
+	ctx.readMemB(oldPc) // Dummy read
 	oldPcH := uint8(ctx.regPC >> 8)
 	ctx.regPC += signExtBtoW(rel.rel)
 	newPcH := uint8(ctx.regPC >> 8)
 	isPageCross := oldPcH != newPcH
 	if isPageCross {
-		ctx.readMemB((ctx.regPC & 0xff) | uint16(oldPcH)<<8) // Dummy read
+		if isBbrOrBbs {
+			ctx.readMemB(oldPc) // Dummy read
+		} else {
+			ctx.readMemB((ctx.regPC & 0xff) | uint16(oldPcH)<<8) // Dummy read
+		}
 	}
 }
 func bcsExec(ctx *clientContext, op operand) error {
@@ -1594,70 +1602,91 @@ func bvcExec(ctx *clientContext, op operand) error {
 	return nil
 }
 
+func doBbr(ctx *clientContext, op operand, bit uint8) error {
+	zpOp, ok := op.(zpOperand)
+	if !ok {
+		panic("expected zeropage operand")
+	}
+	ctx.readMemB(uint16(zpOp.addr)) // Dummy read
+	val, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	relAddr, err := ctx.fetchInstrB()
+	if err != nil {
+		return err
+	}
+	relOp := relOperand{relAddr}
+	doBranch(ctx, relOp, (val&(1<<bit)) == 0)
+	return nil
+}
+func doBbs(ctx *clientContext, op operand, bit uint8) error {
+	zpOp, ok := op.(zpOperand)
+	if !ok {
+		panic("expected zeropage operand")
+	}
+	ctx.readMemB(uint16(zpOp.addr)) // Dummy read
+	val, err := op.read(ctx)
+	if err != nil {
+		return err
+	}
+	relAddr, err := ctx.fetchInstrB()
+	if err != nil {
+		return err
+	}
+	relOp := relOperand{relAddr}
+	doBranch(ctx, relOp, (val&(1<<bit)) != 0)
+	return nil
+}
+
 // FIXME: BBRx and BBSx instructions are implemented, but seems to be broken.
 func bbr0Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<0)) == 0)
-	return nil
+	return doBbr(ctx, op, 0)
 }
 func bbr1Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<1)) == 0)
-	return nil
+	return doBbr(ctx, op, 1)
 }
 func bbr2Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<2)) == 0)
-	return nil
+	return doBbr(ctx, op, 2)
 }
 func bbr3Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<3)) == 0)
-	return nil
+	return doBbr(ctx, op, 3)
 }
 func bbr4Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<4)) == 0)
-	return nil
+	return doBbr(ctx, op, 4)
 }
 func bbr5Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<5)) == 0)
-	return nil
+	return doBbr(ctx, op, 5)
 }
 func bbr6Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<6)) == 0)
-	return nil
+	return doBbr(ctx, op, 6)
 }
 func bbr7Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<7)) == 0)
-	return nil
+	return doBbr(ctx, op, 7)
 }
 func bbs0Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<0)) != 0)
-	return nil
+	return doBbs(ctx, op, 0)
 }
 func bbs1Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<1)) != 0)
-	return nil
+	return doBbs(ctx, op, 1)
 }
 func bbs2Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<2)) != 0)
-	return nil
+	return doBbs(ctx, op, 2)
 }
 func bbs3Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<3)) != 0)
-	return nil
+	return doBbs(ctx, op, 3)
 }
 func bbs4Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<4)) != 0)
-	return nil
+	return doBbs(ctx, op, 4)
 }
 func bbs5Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<5)) != 0)
-	return nil
+	return doBbs(ctx, op, 5)
 }
 func bbs6Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<6)) != 0)
-	return nil
+	return doBbs(ctx, op, 6)
 }
 func bbs7Exec(ctx *clientContext, op operand) error {
-	doBranch(ctx, op, (ctx.regA&(1<<7)) != 0)
-	return nil
+	return doBbs(ctx, op, 7)
 }
 func braExec(ctx *clientContext, op operand) error {
 	doBranch(ctx, op, true)
@@ -1944,7 +1973,11 @@ func adcExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	if ctx.flagD {
-		ctx.readBus(0x7f) // Dummy read
+		if _, ok := op.(immOperand); ok {
+			ctx.readBus(0x7f) // Dummy read
+		} else {
+			ctx.readBus(ctx.lastAccessAddr) // Dummy read
+		}
 		res, carry, overflow := adcDecimalImpl(ctx.regA, rhs, ctx.flagC)
 		ctx.regA = res
 		ctx.flagC = carry
@@ -1966,7 +1999,11 @@ func sbcExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	if ctx.flagD {
-		ctx.readBus(0) // Dummy read
+		if _, ok := op.(immOperand); ok {
+			ctx.readBus(0x0) // Dummy read
+		} else {
+			ctx.readBus(ctx.lastAccessAddr) // Dummy read
+		}
 		res, carry, overflow := sbcDecimalImpl(ctx.regA, rhs, ctx.flagC)
 		ctx.regA = res
 		ctx.flagC = carry
@@ -1999,8 +2036,12 @@ func bitExec(ctx *clientContext, op operand) error {
 	}
 	res := ctx.regA & rhs
 	ctx.flagZ = res == 0
-	ctx.flagN = (rhs & 0x80) != 0
-	ctx.flagV = (rhs & 0x40) != 0
+	// N and V are not affected by BIT #
+	// http://www.6502.org/tutorials/65c02opcodes.html
+	if _, ok := op.(immOperand); !ok {
+		ctx.flagN = (rhs & 0x80) != 0
+		ctx.flagV = (rhs & 0x40) != 0
+	}
 	return nil
 }
 
@@ -2292,6 +2333,7 @@ func brkExec(ctx *clientContext, op operand) error {
 		return err
 	}
 	ctx.flagI = true
+	ctx.flagD = false
 	if v, err := ctx.readMemW(BRK_VECTOR); err != nil {
 		return err
 	} else {
